@@ -1,0 +1,11 @@
+A growing B2B SaaS runs a Python data pipeline nightly on AWS Batch: ingests ~50 GB of customer event logs from S3, joins against a 200 GB dimension table in Postgres, writes daily Parquet to S3 for analytics. Current cost ~$800/month (Batch compute + Postgres reads + S3). Runtime: 4 hours. Team: 3 backend engineers, no data engineer. Business pressure: add 3 new customer-facing dashboards that query this output, and onboard 2 enterprise tenants whose data volumes will 3x the inputs within 90 days.
+
+Evaluate these five next-step options and recommend one:
+
+(A) Optimize the existing Python (profile, vectorize with numpy/polars, parallelize with multiprocessing).
+(B) Rewrite the pipeline in Rust.
+(C) Move to Spark on AWS EMR.
+(D) Adopt DuckDB for single-machine SQL over S3 Parquet (replace Python joins with DuckDB SQL).
+(E) Move to a serverless query engine like AWS Athena + Glue for scheduling.
+
+Give quantitative estimates where possible (even rough orders of magnitude). State load-bearing assumptions. Recommend one option. Name the condition under which the recommendation flips.

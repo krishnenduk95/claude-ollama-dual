@@ -1,0 +1,13 @@
+You are Opus 4.6 the orchestrator. Your task:
+
+1. PLAN: Design a minimal Python slugify() function that converts arbitrary strings to URL-safe slugs. Write a one-paragraph plan.
+
+2. DISPATCH: Use the Agent tool to dispatch the glm-worker subagent with a precise brief. The brief must tell glm-worker to:
+   - Create file tests_quality/slugify_output.py containing the slugify(text: str) -> str function
+   - Handle: unicode accents (café → cafe), special chars, multiple spaces, leading/trailing whitespace, empty input
+   - Include 4 pytest test cases in the same file at the bottom
+   - Return the complete file path after writing
+
+3. REVIEW: After glm-worker returns, read the file it created, verify it meets the brief, and report: files created, line count, whether tests look correct, and one-sentence quality verdict.
+
+Be concise. Do NOT write the slugify code yourself — that's GLM's job. You plan, dispatch, review.

@@ -1,0 +1,35 @@
+#!/bin/bash
+# claude-dual — launch Claude Code with Opus ↔ GLM 5.1 auto-routing
+#   Main session + claude-* models → Claude Max via Anthropic (OAuth forwarded)
+#   glm-* / gemma / qwen / llama / *:* models → Ollama at localhost:11434
+# No Anthropic API key required; Claude Max subscription auth is preserved.
+
+set -e
+
+PROXY_PORT=3456
+PROXY_DIR="$HOME/.claude-dual"
+PROXY_SCRIPT="$PROXY_DIR/proxy.js"
+PROXY_LOG="$PROXY_DIR/proxy.log"
+
+mkdir -p "$PROXY_DIR"
+
+# start proxy if nothing is listening on PROXY_PORT
+if ! lsof -iTCP:$PROXY_PORT -sTCP:LISTEN >/dev/null 2>&1; then
+  nohup node "$PROXY_SCRIPT" > "$PROXY_LOG" 2>&1 &
+  disown
+  for i in 1 2 3 4 5; do
+    sleep 0.3
+    lsof -iTCP:$PROXY_PORT -sTCP:LISTEN >/dev/null 2>&1 && break
+  done
+fi
+
+# sanity: ollama must be reachable
+if ! curl -sf http://localhost:11434/api/tags >/dev/null 2>&1; then
+  echo "warning: ollama not reachable at http://localhost:11434 — GLM routes will fail until you run 'ollama serve'" >&2
+fi
+
+export ANTHROPIC_BASE_URL="http://127.0.0.1:$PROXY_PORT"
+unset ANTHROPIC_AUTH_TOKEN 2>/dev/null
+unset ANTHROPIC_API_KEY 2>/dev/null
+
+exec claude "$@"

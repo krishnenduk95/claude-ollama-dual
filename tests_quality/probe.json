@@ -1,0 +1,1 @@
+{"model":"glm-5.1:cloud","max_tokens":1500,"thinking":{"type":"enabled","budget_tokens":16000},"temperature":0.3,"messages":[{"role":"user","content":"What are the top 3 non-obvious failure modes of Kubernetes HPA for bursty traffic, and one concrete mitigation per failure?"}]}
