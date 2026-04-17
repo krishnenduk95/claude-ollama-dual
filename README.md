@@ -6,9 +6,10 @@
 ![Node](https://img.shields.io/badge/node-%E2%89%A518-green)
 ![Claude%20Code](https://img.shields.io/badge/Claude%20Code-2.x-orange)
 ![GLM](https://img.shields.io/badge/GLM-5.1%20Cloud-purple)
+![Agents](https://img.shields.io/badge/subagents-9-blueviolet)
 ![Tests](https://img.shields.io/badge/tests-27%20passing-brightgreen)
 ![CI](https://github.com/krishnenduk95/claude-ollama-dual/actions/workflows/ci.yml/badge.svg)
-![Version](https://img.shields.io/badge/version-1.0.0-informational)
+![Version](https://img.shields.io/badge/version-1.5.0-informational)
 
 > Built for developers who ran into Anthropic's tightened Claude Max usage caps and want to stretch every Opus token without losing reasoning quality.
 
@@ -65,6 +66,53 @@ The proxy isn't just a router — it's a hardened HTTP gateway with:
 | **Unit tested** | 27 passing tests via `node:test`, CI on macOS + Ubuntu × Node 18/20/22 |
 
 All 12+ knobs tunable via env vars. See `proxy/proxy.js` header for full list.
+
+## SaaS Builder pipeline (v1.5)
+
+Beyond the 4 generalist subagents (worker/explorer/reviewer/analyst), v1.5 adds 5 specialists for end-to-end SaaS construction:
+
+| Specialist | What it does |
+|---|---|
+| `glm-architect` | System/feature architecture — produces `plans/NNN-<slug>.md` with decisions + dependency DAG |
+| `glm-api-designer` | REST/GraphQL endpoints + validation schemas + OpenAPI + full test suites |
+| `glm-ui-builder` | React/Vue/Svelte components — enforces 6-state rule (loading/empty/error/partial/happy/stale), a11y, responsive |
+| `glm-test-generator` | Exhaustive tests from spec — 8-category coverage (boundaries, concurrency, security, idempotency, etc.) |
+| `glm-security-auditor` | Read-only SAST across 12 categories (OWASP top 10 + more); auto-escalates CRITICAL to Opus |
+
+Plus **4 knowledge packs** (`knowledge/saas/`) that specialists consult when relevant:
+
+- `auth-flows.md` — login, signup, reset, sessions, JWT, OAuth, MFA, passkeys
+- `multi-tenancy.md` — shared-schema / schema-per-tenant / DB-per-tenant + Postgres RLS
+- `stripe-billing.md` — subscriptions, webhooks, proration, idempotency, tax
+- `background-jobs.md` — queues, retries, idempotency, dead-letters
+
+### The `/saas-build` pipeline
+
+For end-to-end feature construction, use `/saas-build`:
+
+```
+/saas-build Build a tenant invitation feature: admins invite by email, invitees accept via token, email notification, multi-use vs single-use toggle, expires in 7 days.
+```
+
+Runs automatically:
+
+```
+Phase 0  (Opus) scope clarification (≤5 questions if needed)
+Phase 1  (glm-architect) architecture + plan file
+Phase 2  (parallel workers) schema + migrations + models
+Phase 3  (glm-test-generator) tests FIRST — TDD
+Phase 4  (glm-api-designer × N parallel) API handlers + validation + OpenAPI
+Phase 5  (glm-ui-builder × N parallel) UI components with 6-state coverage
+Phase 6  (glm-test-generator) integration + E2E tests
+Phase 7  (glm-security-auditor) 12-category SAST pass
+Phase 8  (glm-reviewer) 10-category diff review
+Phase 9  (glm-worker) docs + CHANGELOG
+Phase 10 (Opus) integration + verification
+```
+
+Specialists dispatch in parallel within a phase where deps allow. Opus orchestrates and reviews every handoff. Security findings touching auth/crypto/billing/PII **always** escalate back to Opus.
+
+This doesn't make GLM 5.1 equal to Opus 4.7 on every raw task — it makes the **system's** end-to-end output match or exceed what a single Opus pass would produce, because no single model run covers every specialist dimension the way the pipeline does.
 
 ---
 

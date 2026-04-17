@@ -6,10 +6,27 @@ When the subagents `glm-worker`, `glm-explorer`, `glm-reviewer`, or `glm-analyst
 **What you keep for yourself:** auth/crypto/billing/PII/data-migration work (anything security-sensitive), hard debugging (intermittent, concurrency, perf), final architecture calls, integration, merge conflicts, production incidents, reviewing GLM's output before merge, anything needing staff-level judgment on a live system.
 
 **What you delegate to GLM:**
-- `glm-worker` → implementation from a precise plan (CRUD, handlers, migrations, repositories, tests from spec, UI components from design, dependency bumps, rename refactors, scaffolding).
+
+*Generalists:*
+- `glm-worker` → implementation from a precise plan (CRUD, handlers, migrations, repositories, dependency bumps, rename refactors, scaffolding).
 - `glm-explorer` → codebase investigation: "where is X implemented / how does Y work / trace data flow / find all callers of Z" — returns file:line evidence.
-- `glm-reviewer` → routine diff review: 9-category walkthrough with severity tags; auto-escalates security-sensitive diffs back to you.
+- `glm-reviewer` → routine diff review: 10-category walkthrough with severity tags; auto-escalates security-sensitive diffs back to you.
 - `glm-analyst` → deep reasoning tasks: architecture tradeoffs, library/DB/framework selection, capacity planning, ranking options — returns typed assumptions, MECE option matrix, recommendation + flip-condition.
+
+*SaaS specialists (v1.5):*
+- `glm-architect` → system / feature architecture — produces `plans/NNN-<slug>.md` with decisions, component diagram, subtask DAG, risk analysis. Outputs plans, not code.
+- `glm-api-designer` → REST / GraphQL / RPC endpoint design + implementation. Produces route handlers + validation schemas + OpenAPI specs + tests.
+- `glm-ui-builder` → React / Vue / Svelte / mobile components from design brief. Handles all 6 states (loading/empty/error/partial/happy/stale), accessibility, responsive breakpoints.
+- `glm-test-generator` → exhaustive unit / integration / property-based / E2E tests from spec. 8-category coverage framework.
+- `glm-security-auditor` → read-only SAST-style audit (OWASP top 10, injection, IDOR, crypto misuse, SSRF, etc.) — auto-escalates anything touching auth/crypto/billing/PII back to you.
+
+**Knowledge packs (in `knowledge/saas/`):** subagents consult these when relevant:
+- `auth-flows.md` — login, signup, password reset, sessions, OAuth, MFA
+- `multi-tenancy.md` — shared-schema vs schema-per-tenant vs DB-per-tenant, RLS, tenant context propagation
+- `stripe-billing.md` — subscriptions, webhooks, proration, idempotency, tax, pitfalls
+- `background-jobs.md` — queues, retries, idempotency, scheduling
+
+**For end-to-end SaaS feature construction:** use `/saas-build` — orchestrates architect → schema → tests-first → api → ui → integration tests → security audit → review → docs with parallelism where deps allow.
 
 **Heuristic:** if a junior engineer with a good spec could do it correctly → dispatch to GLM. Otherwise → do it yourself.
 
