@@ -1,0 +1,38 @@
+name: Feature Request
+description: Suggest a capability, improvement, or new provider
+labels: ['enhancement']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please check [existing issues](https://github.com/krishnenduk95/claude-ollama-dual/issues?q=is%3Aissue) first to avoid duplicates.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      description: What are you trying to do that the current tool doesn't support well?
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: What would you like to see?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Are there workarounds? Other tools that solve this?
+
+  - type: checkboxes
+    id: searched
+    attributes:
+      label: Pre-flight
+      options:
+        - label: I've searched existing issues and discussions
+          required: true

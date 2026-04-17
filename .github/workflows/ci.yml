@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: test (${{ matrix.os }} / Node ${{ matrix.node-version }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node-version: ['18.x', '20.x', '22.x']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Install proxy dependencies
+        working-directory: proxy
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install --no-audit --no-fund
+          fi
+
+      - name: Syntax check (proxy)
+        working-directory: proxy
+        run: npm run lint
+
+      - name: Run unit tests
+        working-directory: proxy
+        run: npm test
+
+      - name: Syntax check install.sh
+        run: bash -n install.sh
+
+      - name: Syntax check uninstall.sh
+        run: if [ -f uninstall.sh ]; then bash -n uninstall.sh; else echo "uninstall.sh not present"; fi
+
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run shellcheck
+        uses: ludeeus/action-shellcheck@master
+        with:
+          severity: warning
+          scandir: '.'
+          check_together: 'yes'
+          ignore_paths: 'node_modules tests_quality plans .claude'
+
+  validate-service-files:
+    name: service file validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate systemd unit
+        run: |
+          if [ -f service/linux/claude-dual-proxy.service ]; then
+            systemd-analyze verify service/linux/claude-dual-proxy.service || true
+          fi
+      - name: Validate plist XML
+        run: |
+          if [ -f launchagent/com.claude-dual-proxy.plist.template ]; then
+            python3 -c "import plistlib,sys; d=open('launchagent/com.claude-dual-proxy.plist.template').read().replace('__HOME__','/tmp/test'); plistlib.loads(d.encode())"
+          fi

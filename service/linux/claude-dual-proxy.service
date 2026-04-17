@@ -1,0 +1,23 @@
+[Unit]
+Description=claude-dual proxy (Claude Opus + GLM via Ollama routing)
+Documentation=https://github.com/krishnenduk95/claude-ollama-dual
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/env node %h/.claude-dual/proxy.js
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:%h/.claude-dual/proxy.log
+StandardError=append:%h/.claude-dual/proxy.err.log
+Environment=NODE_ENV=production
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+# Resource limits (adjust if you run heavy concurrent loads)
+LimitNOFILE=65535
+# Kill the whole process group on stop
+KillMode=control-group
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

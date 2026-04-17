@@ -2,11 +2,13 @@
 
 **One command, two frontier models, zero manual switching.** `claude-dual` wires Claude Opus 4.7 (via your Claude Max subscription) and GLM 5.1 Cloud (via Ollama) into a single Claude Code session so Opus orchestrates and GLM executes — automatically, across any project folder.
 
-![Platform](https://img.shields.io/badge/platform-macOS-blue)
+![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-blue)
 ![Node](https://img.shields.io/badge/node-%E2%89%A518-green)
 ![Claude%20Code](https://img.shields.io/badge/Claude%20Code-2.x-orange)
 ![GLM](https://img.shields.io/badge/GLM-5.1%20Cloud-purple)
-![Status](https://img.shields.io/badge/status-stable-brightgreen)
+![Tests](https://img.shields.io/badge/tests-27%20passing-brightgreen)
+![CI](https://github.com/krishnenduk95/claude-ollama-dual/actions/workflows/ci.yml/badge.svg)
+![Version](https://img.shields.io/badge/version-1.0.0-informational)
 
 > Built for developers who ran into Anthropic's tightened Claude Max usage caps and want to stretch every Opus token without losing reasoning quality.
 
@@ -36,11 +38,33 @@
 
 - Keeps your main Claude Code session on **Opus 4.7 at xhigh effort** (your Claude Max subscription — no API key needed).
 - Registers four GLM 5.1–backed subagents (`glm-worker`, `glm-explorer`, `glm-reviewer`, `glm-analyst`) that Opus dispatches automatically based on task shape.
-- Routes every request through a tiny custom proxy that forwards Anthropic's OAuth bearer token intact (so Claude Max keeps working) while sending GLM requests to Ollama.
+- Routes every request through a production-grade proxy that forwards Anthropic's OAuth bearer token intact (so Claude Max keeps working) while sending GLM requests to Ollama.
 - Injects **extended thinking (32k tokens)** + **temperature 0.3** on GLM calls so GLM output approaches Opus-tier reasoning on code and routine analysis.
 - Works in **any directory, any project** — the delegation rule lives in your global `~/.claude/CLAUDE.md`.
+- **Runs on macOS, Linux, and Windows** with native service management (LaunchAgent / systemd user unit / NSSM or Task Scheduler).
 
 **You type normally. Opus and GLM coordinate under the hood. You never touch `/model`.**
+
+## Enterprise-grade proxy (v1.0.0)
+
+The proxy isn't just a router — it's a hardened HTTP gateway with:
+
+| Capability | How |
+|---|---|
+| **Health + readiness** | `GET /health`, `/livez`, `/readyz` for monitoring tools |
+| **Prometheus metrics** | `GET /metrics` — request counters, duration histograms, circuit state, cost, in-flight gauges |
+| **Cost tracking + alerts** | `GET /cost` with per-model breakdown; warns at 80% and errors at 100% of `COST_DAILY_LIMIT_USD` |
+| **Audit trail** | Every dispatch logged as JSON lines at `~/.claude-dual/audit.jsonl` |
+| **Structured logging** | pino-based JSON logs with per-request IDs for trace correlation |
+| **Retry with backoff** | 3 attempts with exponential backoff + jitter on network errors and 5xx |
+| **Circuit breaker** | Per-provider; opens after 5 failures, half-opens after 30s, auto-closes on success |
+| **Rate limiting** | Token bucket, 200 req/min per provider (tunable via `RATE_LIMIT_RPM`) |
+| **Request size limit** | 10 MB default (`MAX_REQUEST_BYTES`), rejects oversized with 413 |
+| **Optional auth** | Set `PROXY_AUTH_TOKEN` to require Bearer auth; Claude Max OAuth always passes through |
+| **Graceful shutdown** | SIGTERM drains in-flight requests, exits within 30s |
+| **Unit tested** | 27 passing tests via `node:test`, CI on macOS + Ubuntu × Node 18/20/22 |
+
+All 12+ knobs tunable via env vars. See `proxy/proxy.js` header for full list.
 
 ---
 

@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
-# claude-dual installer (macOS)
-# Wires up: proxy, launcher, LaunchAgent, 4 GLM subagents, /orchestrate slash command,
-# and the global CLAUDE.md delegation rule. Safe to re-run.
+# claude-dual installer — macOS + Linux
+# Wires up: proxy (with npm deps), launcher, persistent service (LaunchAgent / systemd),
+# 4 GLM subagents, /orchestrate slash command, global CLAUDE.md delegation rule,
+# and sets effortLevel: xhigh in ~/.claude/settings.json. Safe to re-run.
+#
+# Windows users: run `install.ps1` in PowerShell instead.
 
 set -e
 
@@ -13,12 +16,19 @@ die() { printf "  ${R}✗${N} %s\n" "$*"; exit 1; }
 
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# ── OS ─────────────────────────────────────────────────────────────
-[ "$(uname)" = "Darwin" ] || die "macOS-only installer (LaunchAgent used for persistence). Linux users: adapt the LaunchAgent step to systemd."
+# ── Platform detection ─────────────────────────────────────────────
+OS="$(uname -s)"
+case "$OS" in
+  Darwin)  PLATFORM="macos" ;;
+  Linux)   PLATFORM="linux" ;;
+  MINGW*|MSYS*|CYGWIN*)
+    die "Windows detected. Please run install.ps1 in PowerShell: .\\install.ps1" ;;
+  *)
+    die "Unsupported OS: $OS" ;;
+esac
+say "installing claude-dual on $PLATFORM"
 
 # ── Prerequisites ──────────────────────────────────────────────────
-say "checking prerequisites"
-
 command -v node >/dev/null 2>&1 || die "Node.js not found. Install from https://nodejs.org (v18+)"
 NODE_MAJOR=$(node -v | sed 's/v//' | cut -d. -f1)
 [ "$NODE_MAJOR" -ge 18 ] || die "Node.js 18+ required (have $NODE_MAJOR). Upgrade via nvm or nodejs.org."
@@ -32,7 +42,7 @@ ok "Claude Code $(claude --version 2>&1 | head -1)"
 
 curl -sf http://localhost:11434/api/tags >/dev/null 2>&1 \
   && ok "Ollama daemon reachable on :11434" \
-  || warn "Ollama daemon not running — start it with: ollama serve  (or open the Ollama app)"
+  || warn "Ollama daemon not running — start it with: ollama serve"
 
 # ── GLM model ──────────────────────────────────────────────────────
 say "checking glm-5.1:cloud model"
@@ -47,9 +57,21 @@ fi
 # ── Install files ──────────────────────────────────────────────────
 say "installing files"
 
-mkdir -p "$HOME/.claude-dual" "$HOME/.claude/agents" "$HOME/.claude/commands" "$HOME/.local/bin" "$HOME/Library/LaunchAgents"
+mkdir -p "$HOME/.claude-dual" "$HOME/.claude/agents" "$HOME/.claude/commands" "$HOME/.local/bin"
 
-cp "$REPO_DIR/proxy/proxy.js"        "$HOME/.claude-dual/proxy.js";       ok "proxy → ~/.claude-dual/proxy.js"
+cp "$REPO_DIR/proxy/proxy.js"         "$HOME/.claude-dual/proxy.js";      ok "proxy → ~/.claude-dual/proxy.js"
+cp "$REPO_DIR/proxy/package.json"     "$HOME/.claude-dual/package.json";  ok "package.json → ~/.claude-dual/package.json"
+
+# Install npm deps for structured logging + metrics (optional but recommended)
+if command -v npm >/dev/null 2>&1; then
+  say "installing proxy dependencies (pino, prom-client)"
+  (cd "$HOME/.claude-dual" && npm install --omit=dev --no-audit --no-fund --silent 2>/dev/null) \
+    && ok "deps installed" \
+    || warn "npm install failed — proxy will fall back to basic logging (still functional)"
+else
+  warn "npm not found — proxy will fall back to basic logging (still functional)"
+fi
+
 cp "$REPO_DIR/agents/glm-worker.md"   "$HOME/.claude/agents/";            ok "agent → ~/.claude/agents/glm-worker.md"
 cp "$REPO_DIR/agents/glm-explorer.md" "$HOME/.claude/agents/";            ok "agent → ~/.claude/agents/glm-explorer.md"
 cp "$REPO_DIR/agents/glm-reviewer.md" "$HOME/.claude/agents/";            ok "agent → ~/.claude/agents/glm-reviewer.md"
@@ -58,13 +80,32 @@ cp "$REPO_DIR/commands/orchestrate.md" "$HOME/.claude/commands/";         ok "sl
 cp "$REPO_DIR/bin/claude-dual"         "$HOME/.local/bin/claude-dual"
 chmod +x "$HOME/.local/bin/claude-dual";                                  ok "launcher → ~/.local/bin/claude-dual"
 
-# ── LaunchAgent (persistent proxy) ────────────────────────────────
-say "installing LaunchAgent"
-PLIST="$HOME/Library/LaunchAgents/com.claude-dual-proxy.plist"
-sed "s|__HOME__|$HOME|g" "$REPO_DIR/launchagent/com.claude-dual-proxy.plist.template" > "$PLIST"
-launchctl unload "$PLIST" 2>/dev/null || true
-launchctl load -w "$PLIST"
-ok "LaunchAgent loaded: com.claude-dual-proxy"
+# ── Persistent service (platform-specific) ─────────────────────────
+if [ "$PLATFORM" = "macos" ]; then
+  say "installing LaunchAgent (macOS)"
+  mkdir -p "$HOME/Library/LaunchAgents"
+  PLIST="$HOME/Library/LaunchAgents/com.claude-dual-proxy.plist"
+  sed "s|__HOME__|$HOME|g" "$REPO_DIR/launchagent/com.claude-dual-proxy.plist.template" > "$PLIST"
+  launchctl unload "$PLIST" 2>/dev/null || true
+  launchctl load -w "$PLIST"
+  ok "LaunchAgent loaded: com.claude-dual-proxy"
+
+elif [ "$PLATFORM" = "linux" ]; then
+  say "installing systemd user unit (Linux)"
+  if ! command -v systemctl >/dev/null 2>&1; then
+    warn "systemctl not found. Skipping service install — run proxy manually with: node ~/.claude-dual/proxy.js"
+  else
+    mkdir -p "$HOME/.config/systemd/user"
+    cp "$REPO_DIR/service/linux/claude-dual-proxy.service" "$HOME/.config/systemd/user/"
+    systemctl --user daemon-reload
+    systemctl --user enable --now claude-dual-proxy.service
+    ok "systemd unit loaded: claude-dual-proxy.service"
+    # Enable lingering so the service runs at boot even without login (optional)
+    if command -v loginctl >/dev/null 2>&1; then
+      loginctl enable-linger "$USER" 2>/dev/null || warn "couldn't enable linger (service stops on logout — sudo loginctl enable-linger $USER to fix)"
+    fi
+  fi
+fi
 
 # ── Append delegation rule to global CLAUDE.md ─────────────────────
 say "wiring global delegation rule"
@@ -104,20 +145,33 @@ esac
 # ── Verify ─────────────────────────────────────────────────────────
 say "verifying"
 sleep 2
-if lsof -iTCP:3456 -sTCP:LISTEN >/dev/null 2>&1; then
-  ok "proxy listening on :3456"
-else
-  warn "proxy NOT listening — check: tail ~/.claude-dual/proxy.err.log"
+PORT_CHECK=""
+if command -v lsof >/dev/null 2>&1; then
+  lsof -iTCP:3456 -sTCP:LISTEN >/dev/null 2>&1 && PORT_CHECK="ok"
+elif command -v ss >/dev/null 2>&1; then
+  ss -ltn 2>/dev/null | grep -q ':3456' && PORT_CHECK="ok"
+elif command -v netstat >/dev/null 2>&1; then
+  netstat -tln 2>/dev/null | grep -q ':3456' && PORT_CHECK="ok"
+fi
+[ "$PORT_CHECK" = "ok" ] && ok "proxy listening on :3456" || warn "proxy NOT listening — check ~/.claude-dual/proxy.err.log"
+
+# ── Health check ──────────────────────────────────────────────────
+if command -v curl >/dev/null 2>&1; then
+  health=$(curl -sf http://127.0.0.1:3456/health 2>/dev/null || echo "")
+  [ -n "$health" ] && ok "health endpoint: $health" || warn "health endpoint not responding yet"
 fi
 
 # ── Done ───────────────────────────────────────────────────────────
 echo
 printf "${G}────────────────────────────────────────────────────────${N}\n"
-printf "${G}  claude-dual installed${N}\n"
+printf "${G}  claude-dual installed (${PLATFORM})${N}\n"
 printf "${G}────────────────────────────────────────────────────────${N}\n"
 echo
-echo "  Run:     claude-dual"
-echo "  Test:    claude-dual -p 'Reply: OK' --model claude-opus-4-7"
-echo "  Watch:   tail -f ~/.claude-dual/proxy.log"
-echo "  Uninstall: see README.md"
+echo "  Run:        claude-dual"
+echo "  Test:       claude-dual -p 'Reply: OK' --model claude-opus-4-7"
+echo "  Watch log:  tail -f ~/.claude-dual/proxy.log"
+echo "  Health:     curl http://127.0.0.1:3456/health"
+echo "  Metrics:    curl http://127.0.0.1:3456/metrics"
+echo "  Cost:       curl http://127.0.0.1:3456/cost"
+echo "  Uninstall:  ./uninstall.sh"
 echo

@@ -12,6 +12,7 @@ Thumbs.db
 node_modules/
 npm-debug.log
 yarn-error.log
+# Keep proxy/package-lock.json — committed for reproducible installs
 
 # Python (for test artifacts)
 __pycache__/

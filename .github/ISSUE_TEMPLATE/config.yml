@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Discussions
+    url: https://github.com/krishnenduk95/claude-ollama-dual/discussions
+    about: Ask questions, share setups, or get help.
+  - name: Security vulnerability
+    url: https://github.com/krishnenduk95/claude-ollama-dual/security/advisories/new
+    about: Report vulnerabilities privately (see SECURITY.md)
