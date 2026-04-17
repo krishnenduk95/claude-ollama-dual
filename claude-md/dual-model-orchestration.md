@@ -1,7 +1,7 @@
 
 ## Dual-Model Orchestration (Opus ↔ GLM) — applies in every project
 
-When the subagents `glm-worker`, `glm-explorer`, `glm-reviewer`, or `glm-analyst` exist in `~/.claude/agents/`, you are running in dual-model mode. You are Opus 4.7 xhigh-effort. GLM 5.1 xhigh-effort is available as those subagents.
+When the subagents `glm-worker`, `glm-explorer`, `glm-reviewer`, or `glm-analyst` exist in `~/.claude/agents/`, you are running in dual-model mode. You are Opus 4.7 xhigh-effort. GLM 5.1 at max reasoning (32k thinking budget) is available as those subagents.
 
 **What you keep for yourself:** auth/crypto/billing/PII/data-migration work (anything security-sensitive), hard debugging (intermittent, concurrency, perf), final architecture calls, integration, merge conflicts, production incidents, reviewing GLM's output before merge, anything needing staff-level judgment on a live system.
 

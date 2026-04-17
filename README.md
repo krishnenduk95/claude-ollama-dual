@@ -37,7 +37,7 @@
 - Keeps your main Claude Code session on **Opus 4.7 at xhigh effort** (your Claude Max subscription — no API key needed).
 - Registers four GLM 5.1–backed subagents (`glm-worker`, `glm-explorer`, `glm-reviewer`, `glm-analyst`) that Opus dispatches automatically based on task shape.
 - Routes every request through a tiny custom proxy that forwards Anthropic's OAuth bearer token intact (so Claude Max keeps working) while sending GLM requests to Ollama.
-- Injects **extended thinking (32k tokens)** + **temperature 0.3** on GLM calls so GLM output matches Opus-caliber reasoning.
+- Injects **extended thinking (32k tokens)** + **temperature 0.3** on GLM calls so GLM output approaches Opus-tier reasoning on code and routine analysis.
 - Works in **any directory, any project** — the delegation rule lives in your global `~/.claude/CLAUDE.md`.
 
 **You type normally. Opus and GLM coordinate under the hood. You never touch `/model`.**
@@ -46,7 +46,7 @@
 
 ## Why it exists
 
-Anthropic reduced Claude Max usage limits. Running every task on Opus burns the quota fast. GLM 5.1 Cloud is cheap, near-Opus on code, and speaks the Anthropic message format natively through Ollama — so it's a natural worker model if you can route requests correctly.
+Anthropic reduced Claude Max usage limits. Running every task on Opus burns the quota fast. GLM 5.1 Cloud is cheap, near-Opus-4.6 on SWE-bench Verified and ahead of 4.6 on SWE-bench Pro, and speaks the Anthropic message format natively through Ollama — so it's a natural worker model if you can route requests correctly.
 
 **The hard part:** Claude Max authenticates with OAuth, not an API key. Every off-the-shelf router (claude-code-router, LiteLLM, ollama-launch) substitutes the Authorization header with a configured API key, which breaks Claude Max. This project's ~100-line custom proxy forwards the incoming Authorization header untouched on Anthropic routes — keeping OAuth alive — while handling GLM routes normally.
 
@@ -280,6 +280,28 @@ When you type a prompt in a `claude-dual` session, Opus classifies the task usin
 │                               temp=0.3, max_tokens≥8192)     │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+---
+
+## GLM 5.1 vs Opus 4.7 — honest capability notes
+
+GLM 5.1 is a strong open-weights model from Z.ai (Mixture-of-Experts, 754B total / 40B active parameters). It's excellent for delegated worker tasks but is **not equivalent** to Opus 4.7 on every dimension. Here's the honest read so you know what to expect:
+
+| Benchmark | GLM 5.1 | Opus 4.6 | Opus 4.7 | Read |
+|---|---:|---:|---:|---|
+| SWE-bench Verified | 77.8% | 80.8% | 87.6% | Opus 4.7 pulled significantly ahead (~10 pt gap). |
+| SWE-bench Pro (harder, real GitHub issues) | **58.4** | 57.3 | n/a public | GLM 5.1 beats Opus 4.6; Opus 4.7 figure not public yet. |
+| AIME 2026 I (math) | 92.7% | n/a | n/a | GLM 5.1 is strong at competition math. |
+| GPQA-Diamond (graduate-level reasoning) | 86.0% | n/a | n/a | Competitive with top frontier models. |
+| Internal Claude-Code harness coding eval (Z.ai self-reported) | 45.3 (94.6% of Opus 4.6) | 47.9 | n/a | Claim not yet independently replicated. |
+
+**What this means in practice:**
+
+- **GLM 5.1 is very good for what we delegate to it** — CRUD implementation, refactors, codebase exploration, routine review, scaffolding, test-writing from a spec. The 32k thinking budget + temperature 0.3 injection + our rigor-framework system prompts close most of the remaining gap against Opus on these tasks.
+- **Opus 4.7 is still meaningfully stronger on hard reasoning** — novel architecture, subtle concurrency bugs, security-sensitive work, production incident diagnosis. The delegation rule in `~/.claude/CLAUDE.md` keeps exactly those tasks on Opus and ships the bulk-volume work to GLM. That's the whole point of the split.
+- **If you push GLM beyond its sweet spot, you'll feel it.** If you find GLM's output landing at 80–90% of what you'd expect from Opus on a task, that's accurate — and it's why Opus reviews every GLM dispatch before the result reaches you.
+
+**Sources:** SWE-bench ([vals.ai](https://www.vals.ai/benchmarks/swebench)), [Z.ai GLM 5.1 benchmarks](https://huggingface.co/zai-org/GLM-5.1), [Opus 4.7 launch](https://www.anthropic.com/news/claude-opus-4-7), [independent comparison](https://wavespeed.ai/blog/posts/glm-5-1-vs-claude-gpt-gemini-deepseek-llm-comparison/).
 
 ---
 
