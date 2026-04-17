@@ -1,6 +1,6 @@
-# claude-dual — Claude Opus 4.6 + GLM 5.1 in one Claude Code session
+# claude-dual — Claude Opus 4.7 + GLM 5.1 in one Claude Code session
 
-**One command, two frontier models, zero manual switching.** `claude-dual` wires Claude Opus 4.6 (via your Claude Max subscription) and GLM 5.1 Cloud (via Ollama) into a single Claude Code session so Opus orchestrates and GLM executes — automatically, across any project folder.
+**One command, two frontier models, zero manual switching.** `claude-dual` wires Claude Opus 4.7 (via your Claude Max subscription) and GLM 5.1 Cloud (via Ollama) into a single Claude Code session so Opus orchestrates and GLM executes — automatically, across any project folder.
 
 ![Platform](https://img.shields.io/badge/platform-macOS-blue)
 ![Node](https://img.shields.io/badge/node-%E2%89%A518-green)
@@ -34,7 +34,7 @@
 
 ## What this does
 
-- Keeps your main Claude Code session on **Opus 4.6 at max effort** (your Claude Max subscription — no API key needed).
+- Keeps your main Claude Code session on **Opus 4.7 at xhigh effort** (your Claude Max subscription — no API key needed).
 - Registers four GLM 5.1–backed subagents (`glm-worker`, `glm-explorer`, `glm-reviewer`, `glm-analyst`) that Opus dispatches automatically based on task shape.
 - Routes every request through a tiny custom proxy that forwards Anthropic's OAuth bearer token intact (so Claude Max keeps working) while sending GLM requests to Ollama.
 - Injects **extended thinking (32k tokens)** + **temperature 0.3** on GLM calls so GLM output matches Opus-caliber reasoning.
@@ -64,7 +64,7 @@ Install these **before** running the installer:
 | **Node.js ≥ 18** | Runs the proxy | `brew install node` or [nodejs.org](https://nodejs.org) |
 | **Ollama** | Serves the `glm-5.1:cloud` model | [ollama.com](https://ollama.com) — download the app |
 | **Claude Code CLI (≥ 2.0)** | The CLI we're orchestrating | [docs.claude.com/en/docs/claude-code](https://docs.claude.com/en/docs/claude-code) — `npm install -g @anthropic-ai/claude-code` |
-| **Active Claude.ai Max subscription** | Opus 4.6 access | Sign in: `claude login` |
+| **Active Claude.ai Max subscription** | Opus 4.7 access | Sign in: `claude login` |
 | **Ollama Cloud signin (free)** | Pulls cloud-hosted GLM 5.1 | `ollama signin` |
 | **`glm-5.1:cloud` pulled** | The model we route GLM requests to | `ollama pull glm-5.1:cloud` *(installer does this for you if missing)* |
 
@@ -75,7 +75,7 @@ node --version            # v18+ expected
 ollama --version          # any recent version
 claude --version          # 2.0+ expected
 ollama list               # should show glm-5.1:cloud (or installer will pull it)
-claude -p "Hi" --model claude-opus-4-6   # confirms your Claude Max signin works
+claude -p "Hi" --model claude-opus-4-7   # confirms your Claude Max signin works
 ```
 
 ---
@@ -101,7 +101,7 @@ The installer will:
 6. Install the launcher at `~/.local/bin/claude-dual` (chmod +x).
 7. Generate and load the LaunchAgent at `~/Library/LaunchAgents/com.claude-dual-proxy.plist` (auto-start on login, auto-restart on crash).
 8. Append the global delegation rule to `~/.claude/CLAUDE.md`.
-9. Set `effortLevel: "max"` in `~/.claude/settings.json`.
+9. Set `effortLevel: "xhigh"` in `~/.claude/settings.json`.
 10. Verify the proxy is listening on port 3456.
 
 If `~/.local/bin` isn't on your `PATH`, add this to your `~/.zshrc` or `~/.bash_profile`:
@@ -133,13 +133,13 @@ launchctl load -w ~/Library/LaunchAgents/com.claude-dual-proxy.plist
 # 4. Delegation rule into your global CLAUDE.md
 cat claude-md/dual-model-orchestration.md >> ~/.claude/CLAUDE.md
 
-# 5. Max effort as default (requires jq — brew install jq)
-jq '. + {"effortLevel":"max","alwaysThinkingEnabled":true}' ~/.claude/settings.json > /tmp/s.json \
+# 5. xhigh effort as default (requires jq — brew install jq)
+jq '. + {"effortLevel":"xhigh","alwaysThinkingEnabled":true}' ~/.claude/settings.json > /tmp/s.json \
   && mv /tmp/s.json ~/.claude/settings.json
 
 # 6. Verify
 lsof -iTCP:3456 -sTCP:LISTEN   # should show node listening
-claude-dual -p "Reply: OK" --model claude-opus-4-6
+claude-dual -p "Reply: OK" --model claude-opus-4-7
 ```
 
 ### First run
@@ -262,7 +262,7 @@ When you type a prompt in a `claude-dual` session, Opus classifies the task usin
                      ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  Claude Code process                                         │
-│    Main model: Opus 4.6 (Claude Max OAuth)                  │
+│    Main model: Opus 4.7 (Claude Max OAuth)                  │
 │    Subagents: glm-worker / glm-explorer / glm-reviewer /    │
 │               glm-analyst   (frontmatter model=glm-5.1:cloud)│
 └─────────────────────────────────────────────────────────────┘
@@ -339,7 +339,7 @@ lsof -iTCP:3456 -sTCP:LISTEN                          # proxy listening
 launchctl list | grep claude-dual                     # LaunchAgent loaded
 curl -sf http://localhost:11434/api/tags | head       # Ollama reachable
 ollama list | grep glm-5.1                            # model present
-claude-dual -p "Reply: OK" --model claude-opus-4-6    # Opus round-trip
+claude-dual -p "Reply: OK" --model claude-opus-4-7    # Opus round-trip
 ```
 
 ### Test GLM directly (shows thinking tokens)
@@ -358,7 +358,7 @@ You should see `"type": "thinking"` blocks in the `content` array and the model 
 ### End-to-end orchestration test
 
 ```bash
-claude-dual -p --permission-mode bypassPermissions --model claude-opus-4-6 \
+claude-dual -p --permission-mode bypassPermissions --model claude-opus-4-7 \
   "Dispatch glm-worker to create hello.py with a greet(name) function and one pytest test. Then read it back and confirm."
 ```
 
@@ -462,7 +462,7 @@ Even ₹10 / $0.12 helps. Thank you for supporting independent open-source work.
 
 **Created by [Zusta Digital](https://www.zustadigtal.com) — www.zustadigtal.com**
 
-Built with Claude Opus 4.6, GLM 5.1 Cloud via Ollama, and a lot of debugging.
+Built with Claude Opus 4.7, GLM 5.1 Cloud via Ollama, and a lot of debugging.
 
 If you ship something cool with this stack, tag us — we'd love to see it.
 
@@ -470,7 +470,7 @@ If you ship something cool with this stack, tag us — we'd love to see it.
 
 ## Keywords
 
-Claude Code, Claude Max, Claude Opus 4.6, GLM 5.1 Cloud, Ollama, Anthropic, multi-model AI, LLM router, AI coding assistant, dual model, Claude Code subagents, OAuth proxy, AI orchestration, SaaS development, AI agent framework, extended thinking, macOS developer tools, Zhipu GLM, Anthropic OAuth, Claude subscription, AI delegation, staff engineer AI.
+Claude Code, Claude Max, Claude Opus 4.7, GLM 5.1 Cloud, Ollama, Anthropic, multi-model AI, LLM router, AI coding assistant, dual model, Claude Code subagents, OAuth proxy, AI orchestration, SaaS development, AI agent framework, extended thinking, macOS developer tools, Zhipu GLM, Anthropic OAuth, Claude subscription, AI delegation, staff engineer AI.
 
 ---
 

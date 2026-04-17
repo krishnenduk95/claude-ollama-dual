@@ -1,4 +1,4 @@
-You are Opus 4.6 the orchestrator. Your task:
+You are Opus 4.7 the orchestrator. Your task:
 
 1. PLAN: Design a minimal Python slugify() function that converts arbitrary strings to URL-safe slugs. Write a one-paragraph plan.
 

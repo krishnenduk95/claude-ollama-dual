@@ -77,22 +77,22 @@ else
   ok "delegation rule appended to ~/.claude/CLAUDE.md"
 fi
 
-# ── settings.json: effortLevel max ─────────────────────────────────
+# ── settings.json: effortLevel xhigh (Opus 4.7's new top-effort tier) ─
 SETTINGS="$HOME/.claude/settings.json"
-say "setting effortLevel: max in ~/.claude/settings.json"
+say "setting effortLevel: xhigh in ~/.claude/settings.json"
 if [ -s "$SETTINGS" ]; then
-  if grep -q '"effortLevel": *"max"' "$SETTINGS"; then
-    ok "effortLevel already max"
+  if grep -q '"effortLevel": *"xhigh"' "$SETTINGS"; then
+    ok "effortLevel already xhigh"
   elif command -v jq >/dev/null 2>&1; then
     tmp="$(mktemp)"
-    jq '. + {"effortLevel":"max","alwaysThinkingEnabled":true}' "$SETTINGS" > "$tmp" && mv "$tmp" "$SETTINGS"
-    ok "effortLevel set to max (jq)"
+    jq '. + {"effortLevel":"xhigh","alwaysThinkingEnabled":true}' "$SETTINGS" > "$tmp" && mv "$tmp" "$SETTINGS"
+    ok "effortLevel set to xhigh (jq)"
   else
-    warn "jq not installed — add \"effortLevel\":\"max\" manually to $SETTINGS"
+    warn "jq not installed — add \"effortLevel\":\"xhigh\" manually to $SETTINGS"
   fi
 else
-  printf '{\n  "alwaysThinkingEnabled": true,\n  "effortLevel": "max"\n}\n' > "$SETTINGS"
-  ok "created settings.json with effortLevel: max"
+  printf '{\n  "alwaysThinkingEnabled": true,\n  "effortLevel":"xhigh"\n}\n' > "$SETTINGS"
+  ok "created settings.json with effortLevel: xhigh"
 fi
 
 # ── PATH check ─────────────────────────────────────────────────────
@@ -117,7 +117,7 @@ printf "${G}  claude-dual installed${N}\n"
 printf "${G}────────────────────────────────────────────────────────${N}\n"
 echo
 echo "  Run:     claude-dual"
-echo "  Test:    claude-dual -p 'Reply: OK' --model claude-opus-4-6"
+echo "  Test:    claude-dual -p 'Reply: OK' --model claude-opus-4-7"
 echo "  Watch:   tail -f ~/.claude-dual/proxy.log"
 echo "  Uninstall: see README.md"
 echo
