@@ -247,6 +247,17 @@ function auditLog(entry) {
   catch {}
 }
 
+// ── Prompt caching injection for Anthropic ───────────────────────────────
+function injectPromptCaching(parsed) {
+  if (typeof parsed.system === 'string' && parsed.system.length > 0) {
+    parsed.system = [{ type: 'text', text: parsed.system, cache_control: { type: 'ephemeral' } }];
+  } else if (Array.isArray(parsed.system) && parsed.system.length > 0) {
+    const last = parsed.system[parsed.system.length - 1];
+    if (!last.cache_control) last.cache_control = { type: 'ephemeral' };
+  }
+  return parsed;
+}
+
 // ── Rigor injection for GLM ──────────────────────────────────────────────
 function applyGlmRigor(parsed) {
   if (!parsed.thinking) {
@@ -431,6 +442,7 @@ async function handle(req, res) {
   }
 
   if (provider === 'ollama') parsed = applyGlmRigor(parsed);
+  else if (provider === 'anthropic') parsed = injectPromptCaching(parsed);
   parsed.model = model;
 
   const outBody = Buffer.from(JSON.stringify(parsed));
@@ -485,10 +497,34 @@ async function handle(req, res) {
 
   res.writeHead(pRes.statusCode, pRes.headers);
   let captured = Buffer.alloc(0);
-  const isJson = (pRes.headers['content-type'] || '').includes('application/json');
+  const contentType = pRes.headers['content-type'] || '';
+  const isJson = contentType.includes('application/json');
+  const isSSE = contentType.includes('text/event-stream');
+  let sseRemainder = '';
+  const sseTok = { input: 0, output: 0, cacheCreate: 0, cacheRead: 0 };
   pRes.on('data', (chunk) => {
     res.write(chunk);
-    if (isJson && captured.length < 1024 * 1024) captured = Buffer.concat([captured, chunk]);
+    if (isSSE) {
+      sseRemainder += chunk.toString('utf8');
+      const lines = sseRemainder.split('\n');
+      sseRemainder = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        try {
+          const evt = JSON.parse(line.slice(6));
+          if (evt.type === 'message_start' && evt.message?.usage) {
+            const u = evt.message.usage;
+            sseTok.input = u.input_tokens || 0;
+            sseTok.cacheCreate = u.cache_creation_input_tokens || 0;
+            sseTok.cacheRead = u.cache_read_input_tokens || 0;
+          } else if (evt.type === 'message_delta' && evt.usage) {
+            sseTok.output = evt.usage.output_tokens || 0;
+          }
+        } catch {}
+      }
+    } else if (isJson && captured.length < 1024 * 1024) {
+      captured = Buffer.concat([captured, chunk]);
+    }
   });
   pRes.on('end', () => {
     res.end();
@@ -500,7 +536,20 @@ async function handle(req, res) {
       metrics.inflight.dec();
     }
     inflight--;
-    if (isJson && captured.length) {
+    if (isSSE && (sseTok.input || sseTok.output)) {
+      trackCost(model, sseTok.input, sseTok.output);
+      reqLogger.info({
+        event: 'request_end', provider, model, status: pRes.statusCode,
+        duration_sec: durSec, input_tokens: sseTok.input, output_tokens: sseTok.output,
+        cache_creation_tokens: sseTok.cacheCreate, cache_read_tokens: sseTok.cacheRead,
+      });
+      auditLog({
+        event: 'request_end', request_id: requestId, provider, model,
+        status: pRes.statusCode, duration_sec: durSec,
+        input_tokens: sseTok.input, output_tokens: sseTok.output,
+        cache_creation_tokens: sseTok.cacheCreate, cache_read_tokens: sseTok.cacheRead,
+      });
+    } else if (isJson && captured.length) {
       try {
         const parsedRes = JSON.parse(captured.toString('utf8'));
         const u = parsedRes.usage || {};
@@ -583,7 +632,7 @@ if (require.main === module) {
 
 // ── Exports for testing ──────────────────────────────────────────────────
 module.exports = {
-  CFG, classifyModel, applyGlmRigor, TokenBucket, CircuitBreaker,
+  CFG, classifyModel, applyGlmRigor, injectPromptCaching, TokenBucket, CircuitBreaker,
   trackCost, costState, PRICING,
   _auth: (req, token) => { const prev = CFG.PROXY_AUTH_TOKEN; CFG.PROXY_AUTH_TOKEN = token; const r = checkAuth(req); CFG.PROXY_AUTH_TOKEN = prev; return r; },
   _breakers: breakers, _limiters: limiters,
