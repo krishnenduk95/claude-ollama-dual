@@ -126,13 +126,13 @@ if [ -s "$SETTINGS" ]; then
     ok "effortLevel already xhigh"
   elif command -v jq >/dev/null 2>&1; then
     tmp="$(mktemp)"
-    jq '. + {"effortLevel":"xhigh","alwaysThinkingEnabled":false}' "$SETTINGS" > "$tmp" && mv "$tmp" "$SETTINGS"
+    jq '. + {"effortLevel":"xhigh","alwaysThinkingEnabled":false,"model":"claude-opus-4-7"}' "$SETTINGS" > "$tmp" && mv "$tmp" "$SETTINGS"
     ok "effortLevel set to xhigh (jq)"
   else
     warn "jq not installed — add \"effortLevel\":\"xhigh\" manually to $SETTINGS"
   fi
 else
-  printf '{\n  "alwaysThinkingEnabled": false,\n  "effortLevel":"xhigh"\n}\n' > "$SETTINGS"
+  printf '{\n  "alwaysThinkingEnabled": false,\n  "effortLevel":"xhigh",\n  "model":"claude-opus-4-7"\n}\n' > "$SETTINGS"
   ok "created settings.json with effortLevel: xhigh"
 fi
 
