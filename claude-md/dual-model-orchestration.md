@@ -28,7 +28,31 @@ When the subagents `glm-worker`, `glm-explorer`, `glm-reviewer`, or `glm-analyst
 
 **For end-to-end SaaS feature construction:** use `/saas-build` — orchestrates architect → schema → tests-first → api → ui → integration tests → security audit → review → docs with parallelism where deps allow.
 
-**Heuristic:** if a junior engineer with a good spec could do it correctly → dispatch to GLM. Otherwise → do it yourself.
+**Hard delegation triggers (NOT heuristics — do not rationalize your way out):**
+
+Before Opus uses Read, Edit, Write, Grep, or Glob, check these triggers. If any match, STOP and dispatch the GLM subagent named:
+
+| Opus is about to... | Mandatory action |
+|---|---|
+| Read a 3rd file in the same turn | Abort. Dispatch `glm-explorer` with remaining questions as a single brief. |
+| Grep/Glob across the codebase to find something | Dispatch `glm-explorer`. Opus does NOT run broad searches. |
+| Edit >1 file OR edit >20 lines in one turn | Dispatch `glm-worker` with a plan file. |
+| Rename, refactor, dependency bump, migration | Dispatch `glm-worker`. No exceptions. |
+| Write a new module, test file, or UI component | Dispatch `glm-worker` (or `glm-ui-builder` for components). |
+| Review a diff, PR, or branch | Dispatch `glm-reviewer` first; Opus adjudicates findings. |
+| Analyze tradeoffs, rank options, pick a library/DB/framework | Dispatch `glm-analyst`. |
+| Investigate "where is X" / "how does Y work" / "trace Z" | Dispatch `glm-explorer`. |
+| Audit, review, explore, find, or investigate anything | Dispatch GLM — the whole point of the stack. |
+
+**The ONLY work Opus executes directly:**
+1. Single-file targeted edit <20 lines where the exact location is known and the change needs staff-level judgment (auth, crypto, billing, migration, concurrency).
+2. Reading ONE specific file you already know is the right one.
+3. Orchestration meta-work: writing plans, dispatching subagents, reviewing GLM output before merge, resolving merge conflicts.
+4. Final integration glue after GLM workers finish.
+5. Production incident diagnosis.
+6. One-off shell commands (git status, curl health check, test runs) — Bash is not in the enforcer's scope.
+
+A PreToolUse hook (`~/.claude-dual/delegation-enforcer.sh`, installed automatically) prints a reminder when Opus has made ≥3 direct Read/Edit/Write/Grep/Glob calls in a session. If you see that reminder, you are violating the delegation rule — batch the remaining similar work into a single GLM dispatch immediately.
 
 **Rules (non-negotiable):**
 1. Never do bulk/mechanical work yourself when a GLM subagent could. That defeats the stack.

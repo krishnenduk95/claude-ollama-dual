@@ -61,6 +61,8 @@ mkdir -p "$HOME/.claude-dual" "$HOME/.claude/agents" "$HOME/.claude/commands" "$
 
 cp "$REPO_DIR/proxy/proxy.js"         "$HOME/.claude-dual/proxy.js";      ok "proxy → ~/.claude-dual/proxy.js"
 cp "$REPO_DIR/proxy/package.json"     "$HOME/.claude-dual/package.json";  ok "package.json → ~/.claude-dual/package.json"
+cp "$REPO_DIR/hooks/delegation-enforcer.sh" "$HOME/.claude-dual/delegation-enforcer.sh"
+chmod +x "$HOME/.claude-dual/delegation-enforcer.sh";                     ok "delegation enforcer → ~/.claude-dual/delegation-enforcer.sh"
 
 # Install npm deps for structured logging + metrics (optional but recommended)
 if command -v npm >/dev/null 2>&1; then
@@ -126,13 +128,29 @@ if [ -s "$SETTINGS" ]; then
     ok "effortLevel already xhigh"
   elif command -v jq >/dev/null 2>&1; then
     tmp="$(mktemp)"
-    jq '. + {"effortLevel":"xhigh","alwaysThinkingEnabled":false,"model":"claude-opus-4-7"}' "$SETTINGS" > "$tmp" && mv "$tmp" "$SETTINGS"
+    jq '. + {"effortLevel":"xhigh","alwaysThinkingEnabled":false,"model":"claude-opus-4-7"} | .hooks.PreToolUse = ((.hooks.PreToolUse // []) + [{"matcher":"Read|Edit|Write|Grep|Glob","hooks":[{"type":"command","command":"~/.claude-dual/delegation-enforcer.sh","timeout":5000}]}] | unique_by(.matcher))' "$SETTINGS" > "$tmp" && mv "$tmp" "$SETTINGS"
     ok "effortLevel set to xhigh (jq)"
   else
     warn "jq not installed — add \"effortLevel\":\"xhigh\" manually to $SETTINGS"
   fi
 else
-  printf '{\n  "alwaysThinkingEnabled": false,\n  "effortLevel":"xhigh",\n  "model":"claude-opus-4-7"\n}\n' > "$SETTINGS"
+  cat > "$SETTINGS" <<'EOF'
+{
+  "alwaysThinkingEnabled": false,
+  "effortLevel": "xhigh",
+  "model": "claude-opus-4-7",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Read|Edit|Write|Grep|Glob",
+        "hooks": [
+          { "type": "command", "command": "~/.claude-dual/delegation-enforcer.sh", "timeout": 5000 }
+        ]
+      }
+    ]
+  }
+}
+EOF
   ok "created settings.json with effortLevel: xhigh"
 fi
 
