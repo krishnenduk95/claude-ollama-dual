@@ -260,14 +260,63 @@ function auditLog(entry) {
 }
 
 // ── Prompt caching injection for Anthropic ───────────────────────────────
+// v1.17.0: marks up to 4 cache_control breakpoints on stable prefixes:
+//   1. system prompt (most stable — reused across turns for the session)
+//   2. end of tools array (tool defs rarely change mid-session)
+//   3. a message two turns back from the tail (stable boundary)
+//   4. a message roughly one-third into the history (early stable prefix)
+// Anthropic deduplicates breakpoints against a rolling session key, so each
+// marker converts its prefix into a cache HIT on subsequent turns.
+// Returns { parsed, breakpoints } so handle() can audit coverage.
 function injectPromptCaching(parsed) {
+  let breakpoints = 0;
+  const MAX_BREAKPOINTS = 4;
+
   if (typeof parsed.system === 'string' && parsed.system.length > 0) {
     parsed.system = [{ type: 'text', text: parsed.system, cache_control: { type: 'ephemeral' } }];
+    breakpoints++;
   } else if (Array.isArray(parsed.system) && parsed.system.length > 0) {
     const last = parsed.system[parsed.system.length - 1];
-    if (!last.cache_control) last.cache_control = { type: 'ephemeral' };
+    if (last && typeof last === 'object') {
+      if (!last.cache_control) last.cache_control = { type: 'ephemeral' };
+      breakpoints++;
+    }
   }
-  return parsed;
+
+  if (breakpoints < MAX_BREAKPOINTS && Array.isArray(parsed.tools) && parsed.tools.length > 0) {
+    const lastTool = parsed.tools[parsed.tools.length - 1];
+    if (lastTool && typeof lastTool === 'object' && !lastTool.cache_control) {
+      lastTool.cache_control = { type: 'ephemeral' };
+      breakpoints++;
+    }
+  }
+
+  if (breakpoints < MAX_BREAKPOINTS && Array.isArray(parsed.messages) && parsed.messages.length >= 4) {
+    const msgs = parsed.messages;
+    const candidates = [];
+    const tail = msgs.length - 3;
+    if (tail >= 1) candidates.push(tail);
+    const early = Math.floor(msgs.length / 3);
+    if (early >= 1 && early !== tail) candidates.push(early);
+
+    for (const idx of candidates) {
+      if (breakpoints >= MAX_BREAKPOINTS) break;
+      const m = msgs[idx];
+      if (!m || !m.content) continue;
+      if (typeof m.content === 'string') {
+        m.content = [{ type: 'text', text: m.content, cache_control: { type: 'ephemeral' } }];
+        breakpoints++;
+      } else if (Array.isArray(m.content) && m.content.length > 0) {
+        const last = m.content[m.content.length - 1];
+        if (last && typeof last === 'object' && !last.cache_control) {
+          last.cache_control = { type: 'ephemeral' };
+          breakpoints++;
+        }
+      }
+    }
+  }
+
+  return { parsed, breakpoints };
 }
 
 // ── v1.15.0: Context compression ─────────────────────────────────────────
@@ -573,6 +622,7 @@ async function handle(req, res) {
   let compressBytes = 0;
   let routingFrom = null;
   let routedModel = model;
+  let cacheBreakpoints = 0;
   if (provider === 'ollama') {
     parsed = applyGlmRigor(parsed);
   } else if (provider === 'anthropic') {
@@ -582,7 +632,9 @@ async function handle(req, res) {
     const r = smartRoute(parsed, model);
     routedModel = r.model;
     routingFrom = r.downgradedFrom;
-    parsed = injectPromptCaching(parsed);
+    const ic = injectPromptCaching(parsed);
+    parsed = ic.parsed;
+    cacheBreakpoints = ic.breakpoints;
   }
   parsed.model = routedModel;
 
@@ -615,11 +667,13 @@ async function handle(req, res) {
     user_agent: req.headers['user-agent'] || '',
     ...(routingFrom ? { routed_from: routingFrom } : {}),
     ...(compressBytes ? { compressed_bytes: compressBytes } : {}),
+    ...(cacheBreakpoints ? { cache_breakpoints: cacheBreakpoints } : {}),
   });
   auditLog({
     event: 'request', request_id: requestId, provider, model: routedModel, path: req.url,
     ...(routingFrom ? { routed_from: routingFrom } : {}),
     ...(compressBytes ? { compressed_bytes: compressBytes } : {}),
+    ...(cacheBreakpoints ? { cache_breakpoints: cacheBreakpoints } : {}),
   });
 
   inflight++;
@@ -691,6 +745,7 @@ async function handle(req, res) {
         cache_creation_tokens: sseTok.cacheCreate, cache_read_tokens: sseTok.cacheRead,
         ...(routingFrom ? { routed_from: routingFrom } : {}),
         ...(compressBytes ? { compressed_bytes: compressBytes } : {}),
+        ...(cacheBreakpoints ? { cache_breakpoints: cacheBreakpoints } : {}),
       });
       auditLog({
         event: 'request_end', request_id: requestId, provider, model: routedModel,
@@ -699,6 +754,7 @@ async function handle(req, res) {
         cache_creation_tokens: sseTok.cacheCreate, cache_read_tokens: sseTok.cacheRead,
         ...(routingFrom ? { routed_from: routingFrom } : {}),
         ...(compressBytes ? { compressed_bytes: compressBytes } : {}),
+        ...(cacheBreakpoints ? { cache_breakpoints: cacheBreakpoints } : {}),
       });
     } else if (isJson && captured.length) {
       try {
@@ -706,19 +762,25 @@ async function handle(req, res) {
         const u = parsedRes.usage || {};
         const inputTok = u.input_tokens || 0;
         const outputTok = u.output_tokens || 0;
+        const cacheCreate = u.cache_creation_input_tokens || 0;
+        const cacheRead = u.cache_read_input_tokens || 0;
         if (inputTok || outputTok) trackCost(routedModel, inputTok, outputTok);
         reqLogger.info({
           event: 'request_end', provider, model: routedModel, status: pRes.statusCode,
           duration_sec: durSec, input_tokens: inputTok, output_tokens: outputTok,
+          cache_creation_tokens: cacheCreate, cache_read_tokens: cacheRead,
           ...(routingFrom ? { routed_from: routingFrom } : {}),
           ...(compressBytes ? { compressed_bytes: compressBytes } : {}),
+          ...(cacheBreakpoints ? { cache_breakpoints: cacheBreakpoints } : {}),
         });
         auditLog({
           event: 'request_end', request_id: requestId, provider, model: routedModel,
           status: pRes.statusCode, duration_sec: durSec,
           input_tokens: inputTok, output_tokens: outputTok,
+          cache_creation_tokens: cacheCreate, cache_read_tokens: cacheRead,
           ...(routingFrom ? { routed_from: routingFrom } : {}),
           ...(compressBytes ? { compressed_bytes: compressBytes } : {}),
+          ...(cacheBreakpoints ? { cache_breakpoints: cacheBreakpoints } : {}),
         });
       } catch {
         reqLogger.info({ event: 'request_end', provider, model: routedModel, status: pRes.statusCode, duration_sec: durSec });
