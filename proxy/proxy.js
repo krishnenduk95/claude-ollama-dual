@@ -84,6 +84,10 @@ const CFG = {
   LOG_LEVEL: process.env.LOG_LEVEL || 'info',
   LOG_FILE: process.env.LOG_FILE || null,
   AUDIT_FILE: process.env.AUDIT_FILE || path.join(os.homedir(), '.claude-dual', 'audit.jsonl'),
+  // v1.15.0 context compression — set to '0' to disable
+  COMPRESS_CONTEXT: process.env.COMPRESS_CONTEXT !== '0',
+  COMPRESS_KEEP_RECENT_TURNS: parseInt(process.env.COMPRESS_KEEP_RECENT_TURNS || '10', 10),
+  COMPRESS_MIN_TOOL_RESULT_BYTES: parseInt(process.env.COMPRESS_MIN_TOOL_RESULT_BYTES || '2000', 10),
 };
 
 // ── Logger ───────────────────────────────────────────────────────────────
@@ -260,6 +264,81 @@ function injectPromptCaching(parsed) {
     if (!last.cache_control) last.cache_control = { type: 'ephemeral' };
   }
   return parsed;
+}
+
+// ── v1.15.0: Context compression ─────────────────────────────────────────
+// Drops old, redundant tool_result payloads to shrink prompt tokens before
+// sending to Anthropic. Rules:
+//   - The last N=COMPRESS_KEEP_RECENT_TURNS messages are kept verbatim.
+//   - In older messages, any tool_result block whose stringified content
+//     exceeds COMPRESS_MIN_TOOL_RESULT_BYTES is replaced with a stub.
+//   - Additionally, for Read tool_results against the same file_path, only
+//     the newest is kept; older duplicates are stubbed (regardless of size).
+// Returns { parsed, bytesSaved }.
+function compressContext(parsed) {
+  if (!CFG.COMPRESS_CONTEXT) return { parsed, bytesSaved: 0 };
+  if (!Array.isArray(parsed.messages) || parsed.messages.length === 0) {
+    return { parsed, bytesSaved: 0 };
+  }
+  const msgs = parsed.messages;
+  const keepFrom = Math.max(0, msgs.length - CFG.COMPRESS_KEEP_RECENT_TURNS);
+  let bytesSaved = 0;
+
+  // Pass 1: build tool_use_id → file_path map for Read dedup.
+  const toolIdToFile = {};
+  for (const m of msgs) {
+    if (!m || !Array.isArray(m.content)) continue;
+    for (const block of m.content) {
+      if (!block || typeof block !== 'object') continue;
+      if (block.type === 'tool_use' && block.name === 'Read' && block.id) {
+        const fp = block.input && (block.input.file_path || block.input.filePath);
+        if (fp) toolIdToFile[block.id] = fp;
+      }
+    }
+  }
+  // Scan tool_results newest → oldest. First per file_path is newest (kept);
+  // every subsequent tool_result for the same file becomes a dedup target.
+  const filesKept = new Set();
+  const dedupTargets = new Set();
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m = msgs[i];
+    if (!m || !Array.isArray(m.content)) continue;
+    for (const block of m.content) {
+      if (!block || block.type !== 'tool_result' || !block.tool_use_id) continue;
+      const fp = toolIdToFile[block.tool_use_id];
+      if (!fp) continue;
+      if (filesKept.has(fp)) dedupTargets.add(block.tool_use_id);
+      else filesKept.add(fp);
+    }
+  }
+
+  const stringify = (v) => {
+    try { return typeof v === 'string' ? v : JSON.stringify(v); }
+    catch { return ''; }
+  };
+
+  // Pass 2: compress. Only rewrite messages older than the keep window.
+  for (let i = 0; i < keepFrom; i++) {
+    const m = msgs[i];
+    if (!m || !Array.isArray(m.content)) continue;
+    for (let j = 0; j < m.content.length; j++) {
+      const block = m.content[j];
+      if (!block || typeof block !== 'object' || block.type !== 'tool_result') continue;
+      const serialized = stringify(block.content);
+      const size = Buffer.byteLength(serialized, 'utf8');
+      const isDup = dedupTargets.has(block.tool_use_id);
+      if (!isDup && size < CFG.COMPRESS_MIN_TOOL_RESULT_BYTES) continue;
+      const reason = isDup ? 'superseded by newer read' : `${size} bytes of stale tool output`;
+      m.content[j] = {
+        type: 'tool_result',
+        tool_use_id: block.tool_use_id,
+        content: `[compressed: ${reason} — elided by claude-dual proxy v1.15]`,
+      };
+      bytesSaved += size;
+    }
+  }
+
+  return { parsed, bytesSaved };
 }
 
 // ── Rigor injection for GLM ──────────────────────────────────────────────
@@ -445,8 +524,15 @@ async function handle(req, res) {
     return;
   }
 
-  if (provider === 'ollama') parsed = applyGlmRigor(parsed);
-  else if (provider === 'anthropic') parsed = injectPromptCaching(parsed);
+  let compressBytes = 0;
+  if (provider === 'ollama') {
+    parsed = applyGlmRigor(parsed);
+  } else if (provider === 'anthropic') {
+    const c = compressContext(parsed);
+    parsed = c.parsed;
+    compressBytes = c.bytesSaved;
+    parsed = injectPromptCaching(parsed);
+  }
   parsed.model = model;
 
   const outBody = Buffer.from(JSON.stringify(parsed));
@@ -476,8 +562,12 @@ async function handle(req, res) {
   reqLogger.info({
     event: 'request_start', provider, model, path: req.url,
     user_agent: req.headers['user-agent'] || '',
+    ...(compressBytes ? { compressed_bytes: compressBytes } : {}),
   });
-  auditLog({ event: 'request', request_id: requestId, provider, model, path: req.url });
+  auditLog({
+    event: 'request', request_id: requestId, provider, model, path: req.url,
+    ...(compressBytes ? { compressed_bytes: compressBytes } : {}),
+  });
 
   inflight++;
   if (metrics) metrics.inflight.inc();
