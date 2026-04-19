@@ -88,6 +88,10 @@ const CFG = {
   COMPRESS_CONTEXT: process.env.COMPRESS_CONTEXT !== '0',
   COMPRESS_KEEP_RECENT_TURNS: parseInt(process.env.COMPRESS_KEEP_RECENT_TURNS || '10', 10),
   COMPRESS_MIN_TOOL_RESULT_BYTES: parseInt(process.env.COMPRESS_MIN_TOOL_RESULT_BYTES || '2000', 10),
+  // v1.16.0 smart model routing — set to '0' to disable
+  SMART_ROUTING: process.env.SMART_ROUTING !== '0',
+  SMART_ROUTING_HAIKU_MAX_INPUT_CHARS: parseInt(process.env.SMART_ROUTING_HAIKU_MAX_INPUT_CHARS || '4000', 10),
+  SMART_ROUTING_SONNET_MAX_INPUT_CHARS: parseInt(process.env.SMART_ROUTING_SONNET_MAX_INPUT_CHARS || '20000', 10),
 };
 
 // ── Logger ───────────────────────────────────────────────────────────────
@@ -357,6 +361,48 @@ function applyGlmRigor(parsed) {
   return parsed;
 }
 
+// ── v1.16.0: Smart model routing ─────────────────────────────────────────
+// Downgrades trivially-small Anthropic requests to cheaper tiers.
+// Guards:
+//   - only rewrites opus-class requests (haiku/sonnet left alone)
+//   - honors thinking=enabled (user explicitly wants reasoning)
+// Returns { model: newModel, downgradedFrom: origModel|null }.
+function smartRoute(parsed, origModel) {
+  if (!CFG.SMART_ROUTING) return { model: origModel, downgradedFrom: null };
+  if (!/opus/i.test(origModel)) return { model: origModel, downgradedFrom: null };
+  if (parsed.thinking && parsed.thinking.type === 'enabled') {
+    return { model: origModel, downgradedFrom: null };
+  }
+  let inputChars = 0;
+  if (typeof parsed.system === 'string') inputChars += parsed.system.length;
+  else if (Array.isArray(parsed.system)) {
+    for (const s of parsed.system) {
+      if (s && typeof s.text === 'string') inputChars += s.text.length;
+    }
+  }
+  if (Array.isArray(parsed.messages)) {
+    for (const m of parsed.messages) {
+      if (!m || !m.content) continue;
+      if (typeof m.content === 'string') inputChars += m.content.length;
+      else if (Array.isArray(m.content)) {
+        for (const block of m.content) {
+          if (!block) continue;
+          if (typeof block.text === 'string') inputChars += block.text.length;
+          else if (typeof block.content === 'string') inputChars += block.content.length;
+          else if (block.input) inputChars += JSON.stringify(block.input).length;
+        }
+      }
+    }
+  }
+  if (inputChars < CFG.SMART_ROUTING_HAIKU_MAX_INPUT_CHARS) {
+    return { model: 'claude-haiku-4-5-20251001', downgradedFrom: origModel };
+  }
+  if (inputChars < CFG.SMART_ROUTING_SONNET_MAX_INPUT_CHARS) {
+    return { model: 'claude-sonnet-4-6', downgradedFrom: origModel };
+  }
+  return { model: origModel, downgradedFrom: null };
+}
+
 // ── Routing classifier ───────────────────────────────────────────────────
 function classifyModel(rawModel) {
   const s = String(rawModel || '');
@@ -525,15 +571,20 @@ async function handle(req, res) {
   }
 
   let compressBytes = 0;
+  let routingFrom = null;
+  let routedModel = model;
   if (provider === 'ollama') {
     parsed = applyGlmRigor(parsed);
   } else if (provider === 'anthropic') {
     const c = compressContext(parsed);
     parsed = c.parsed;
     compressBytes = c.bytesSaved;
+    const r = smartRoute(parsed, model);
+    routedModel = r.model;
+    routingFrom = r.downgradedFrom;
     parsed = injectPromptCaching(parsed);
   }
-  parsed.model = model;
+  parsed.model = routedModel;
 
   const outBody = Buffer.from(JSON.stringify(parsed));
   const fwdHeaders = { ...req.headers };
@@ -560,12 +611,14 @@ async function handle(req, res) {
   }
 
   reqLogger.info({
-    event: 'request_start', provider, model, path: req.url,
+    event: 'request_start', provider, model: routedModel, path: req.url,
     user_agent: req.headers['user-agent'] || '',
+    ...(routingFrom ? { routed_from: routingFrom } : {}),
     ...(compressBytes ? { compressed_bytes: compressBytes } : {}),
   });
   auditLog({
-    event: 'request', request_id: requestId, provider, model, path: req.url,
+    event: 'request', request_id: requestId, provider, model: routedModel, path: req.url,
+    ...(routingFrom ? { routed_from: routingFrom } : {}),
     ...(compressBytes ? { compressed_bytes: compressBytes } : {}),
   });
 
@@ -577,11 +630,11 @@ async function handle(req, res) {
     pRes = await forwardWithRetry(targetOpts, outBody, breaker, reqLogger);
   } catch (err) {
     const statusCode = err.statusCode || 502;
-    reqLogger.error({ event: 'request_failed', provider, model, err: err.message, statusCode });
-    auditLog({ event: 'request_failed', request_id: requestId, provider, model, err: err.message });
+    reqLogger.error({ event: 'request_failed', provider, model: routedModel, err: err.message, statusCode });
+    auditLog({ event: 'request_failed', request_id: requestId, provider, model: routedModel, err: err.message });
     if (metrics) {
-      metrics.requestsTotal.inc({ provider, model, status_class: `${Math.floor(statusCode / 100)}xx` });
-      metrics.requestDuration.observe({ provider, model }, (Date.now() - start) / 1000);
+      metrics.requestsTotal.inc({ provider, model: routedModel, status_class: `${Math.floor(statusCode / 100)}xx` });
+      metrics.requestDuration.observe({ provider, model: routedModel }, (Date.now() - start) / 1000);
       metrics.inflight.dec();
     }
     inflight--;
@@ -625,23 +678,27 @@ async function handle(req, res) {
     const durSec = (Date.now() - start) / 1000;
     const statusClass = `${Math.floor(pRes.statusCode / 100)}xx`;
     if (metrics) {
-      metrics.requestsTotal.inc({ provider, model, status_class: statusClass });
-      metrics.requestDuration.observe({ provider, model }, durSec);
+      metrics.requestsTotal.inc({ provider, model: routedModel, status_class: statusClass });
+      metrics.requestDuration.observe({ provider, model: routedModel }, durSec);
       metrics.inflight.dec();
     }
     inflight--;
     if (isSSE && (sseTok.input || sseTok.output)) {
-      trackCost(model, sseTok.input, sseTok.output);
+      trackCost(routedModel, sseTok.input, sseTok.output);
       reqLogger.info({
-        event: 'request_end', provider, model, status: pRes.statusCode,
+        event: 'request_end', provider, model: routedModel, status: pRes.statusCode,
         duration_sec: durSec, input_tokens: sseTok.input, output_tokens: sseTok.output,
         cache_creation_tokens: sseTok.cacheCreate, cache_read_tokens: sseTok.cacheRead,
+        ...(routingFrom ? { routed_from: routingFrom } : {}),
+        ...(compressBytes ? { compressed_bytes: compressBytes } : {}),
       });
       auditLog({
-        event: 'request_end', request_id: requestId, provider, model,
+        event: 'request_end', request_id: requestId, provider, model: routedModel,
         status: pRes.statusCode, duration_sec: durSec,
         input_tokens: sseTok.input, output_tokens: sseTok.output,
         cache_creation_tokens: sseTok.cacheCreate, cache_read_tokens: sseTok.cacheRead,
+        ...(routingFrom ? { routed_from: routingFrom } : {}),
+        ...(compressBytes ? { compressed_bytes: compressBytes } : {}),
       });
     } else if (isJson && captured.length) {
       try {
@@ -649,22 +706,26 @@ async function handle(req, res) {
         const u = parsedRes.usage || {};
         const inputTok = u.input_tokens || 0;
         const outputTok = u.output_tokens || 0;
-        if (inputTok || outputTok) trackCost(model, inputTok, outputTok);
+        if (inputTok || outputTok) trackCost(routedModel, inputTok, outputTok);
         reqLogger.info({
-          event: 'request_end', provider, model, status: pRes.statusCode,
+          event: 'request_end', provider, model: routedModel, status: pRes.statusCode,
           duration_sec: durSec, input_tokens: inputTok, output_tokens: outputTok,
+          ...(routingFrom ? { routed_from: routingFrom } : {}),
+          ...(compressBytes ? { compressed_bytes: compressBytes } : {}),
         });
         auditLog({
-          event: 'request_end', request_id: requestId, provider, model,
+          event: 'request_end', request_id: requestId, provider, model: routedModel,
           status: pRes.statusCode, duration_sec: durSec,
           input_tokens: inputTok, output_tokens: outputTok,
+          ...(routingFrom ? { routed_from: routingFrom } : {}),
+          ...(compressBytes ? { compressed_bytes: compressBytes } : {}),
         });
       } catch {
-        reqLogger.info({ event: 'request_end', provider, model, status: pRes.statusCode, duration_sec: durSec });
+        reqLogger.info({ event: 'request_end', provider, model: routedModel, status: pRes.statusCode, duration_sec: durSec });
       }
     } else {
-      reqLogger.info({ event: 'request_end', provider, model, status: pRes.statusCode, duration_sec: durSec });
-      auditLog({ event: 'request_end', request_id: requestId, provider, model, status: pRes.statusCode, duration_sec: durSec });
+      reqLogger.info({ event: 'request_end', provider, model: routedModel, status: pRes.statusCode, duration_sec: durSec });
+      auditLog({ event: 'request_end', request_id: requestId, provider, model: routedModel, status: pRes.statusCode, duration_sec: durSec });
     }
   });
   pRes.on('error', (err) => {
