@@ -205,6 +205,10 @@ const PRICING = {
   'claude-sonnet-4-6': { input: 3.00, output: 15.00 },
   'claude-haiku-4-5-20251001': { input: 0.80, output: 4.00 },
   'glm-5.1:cloud': { input: 0.00, output: 0.00 },
+  'kimi-k2.5:cloud': { input: 0.00, output: 0.00 },
+  'deepseek-v3.2:cloud': { input: 0.00, output: 0.00 },
+  'qwen3-coder-next:cloud': { input: 0.00, output: 0.00 },
+  'cogito-2.1:671b-cloud': { input: 0.00, output: 0.00 },
 };
 const costState = { date: isoDate(), byModel: {}, alerted80: false, alerted100: false };
 function isoDate() { return new Date().toISOString().slice(0, 10); }
