@@ -75,6 +75,20 @@ cp "$REPO_DIR/hooks/write-learning.sh"  "$HOME/.claude-dual/write-learning.sh"
 chmod +x "$HOME/.claude-dual/write-learning.sh";                          ok "learnings writer → ~/.claude-dual/write-learning.sh"
 cp "$REPO_DIR/hooks/fetch-learnings.sh" "$HOME/.claude-dual/fetch-learnings.sh"
 chmod +x "$HOME/.claude-dual/fetch-learnings.sh";                         ok "learnings fetcher → ~/.claude-dual/fetch-learnings.sh"
+cp "$REPO_DIR/hooks/verify-learnings.sh" "$HOME/.claude-dual/verify-learnings.sh"
+chmod +x "$HOME/.claude-dual/verify-learnings.sh";                        ok "learnings verifier → ~/.claude-dual/verify-learnings.sh"
+cp "$REPO_DIR/hooks/compute-quota.sh" "$HOME/.claude-dual/compute-quota.sh"
+chmod +x "$HOME/.claude-dual/compute-quota.sh";                           ok "quota compute → ~/.claude-dual/compute-quota.sh"
+cp "$REPO_DIR/hooks/plan-drift.sh" "$HOME/.claude-dual/plan-drift.sh"
+chmod +x "$HOME/.claude-dual/plan-drift.sh";                              ok "plan-drift detector → ~/.claude-dual/plan-drift.sh"
+
+# Seed quota-limits.json on first install (user can tune)
+if [ ! -f "$HOME/.claude-dual/quota-limits.json" ]; then
+  cp "$REPO_DIR/quota-limits.defaults.json" "$HOME/.claude-dual/quota-limits.json"
+  ok "quota limits seeded → ~/.claude-dual/quota-limits.json (tune per your plan)"
+else
+  ok "quota limits already present → ~/.claude-dual/quota-limits.json"
+fi
 
 # ── Learnings fabric: create memory dir + seed if empty ───────────
 mkdir -p "$HOME/.claude-dual/memory"
@@ -188,6 +202,20 @@ if [ -s "$SETTINGS" ]; then
               ]}]
           | unique_by(.matcher)
         )
+      | .hooks.PostToolUse = (
+          (.hooks.PostToolUse // [])
+          + [{"matcher":"Bash","hooks":[
+                {"type":"command","command":"~/.claude-dual/verify-learnings.sh","timeout":5000}
+              ]}]
+          | unique_by(.matcher)
+        )
+      | .hooks.SubagentStop = (
+          (.hooks.SubagentStop // [])
+          + [{"matcher":"","hooks":[
+                {"type":"command","command":"~/.claude-dual/plan-drift.sh","timeout":5000}
+              ]}]
+          | unique_by(.matcher)
+        )
     ' "$SETTINGS" > "$tmp" && mv "$tmp" "$SETTINGS"
     ok "effortLevel set to xhigh (jq)"
   else
@@ -223,6 +251,22 @@ else
         "matcher": "",
         "hooks": [
           { "type": "command", "command": "~/.claude-dual/inject-routing-stats.sh", "timeout": 5000 }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "~/.claude-dual/verify-learnings.sh", "timeout": 5000 }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "",
+        "hooks": [
+          { "type": "command", "command": "~/.claude-dual/plan-drift.sh", "timeout": 5000 }
         ]
       }
     ]
