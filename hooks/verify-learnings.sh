@@ -24,13 +24,20 @@ import json, os, re, sys, datetime, tempfile, shutil
 payload_raw = os.environ.get("HOOK_PAYLOAD", "")
 path = os.environ["LEARNINGS_PATH"]
 
+DEBUG = os.environ.get("CLAUDE_DEBUG") == "1"
+def dbg(msg):
+    if DEBUG:
+        sys.stderr.write(f"verify-learnings[debug]: {msg}\n")
+
 try:
     data = json.loads(payload_raw)
-except Exception:
+except Exception as e:
+    dbg(f"payload parse failed: {e!r}")
     sys.exit(0)
 
 tool_name = data.get("tool_name", "")
 if tool_name != "Bash":
+    dbg(f"skip — tool_name={tool_name!r}")
     sys.exit(0)
 
 tool_input = data.get("tool_input", {}) or {}
@@ -61,14 +68,23 @@ if not any(re.search(p, cmd) for p in TEST_PATTERNS):
     sys.exit(0)
 
 # Determine success: PostToolUse payload shape varies by CC version.
-# Try common shapes: tool_response.stderr == "" && no error flag, or
-# interrupted == false, or stdout present without "FAIL"/"error" tokens.
+# Known fields across versions:
+#   - is_error (bool), interrupted (bool), error (string)
+#   - exit_code / returncode / status (int, 0 = success)
+#   - stderr, stdout, output (strings)
+# Treat any of these as a clear failure signal.
 is_error = tool_response.get("is_error") or tool_response.get("interrupted")
 if is_error:
     sys.exit(0)
+if tool_response.get("error"):
+    sys.exit(0)
+for rc_field in ("exit_code", "returncode", "return_code", "status_code"):
+    rc = tool_response.get(rc_field)
+    if isinstance(rc, int) and rc != 0:
+        sys.exit(0)
 
 stderr = (tool_response.get("stderr") or "").lower()
-stdout = (tool_response.get("stdout") or tool_response.get("output") or "").lower()
+stdout = (tool_response.get("stdout") or tool_response.get("output") or tool_response.get("content") or "").lower()
 combined = stdout + "\n" + stderr
 
 # Heuristic failure markers. Be conservative — only skip verify on CLEAR failure.

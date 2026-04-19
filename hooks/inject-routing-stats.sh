@@ -89,11 +89,13 @@ try:
                 pct  = d.get("weekly_pct")
                 status = d.get("status", "ok")
                 today = d.get("today", 0)
+                calibrated = d.get("auto_calibrated", False)
                 lim_str = str(lim) if lim else "?"
                 pct_str = f"{pct}%" if pct is not None else "?"
+                cal_str = " [auto-calibrated]" if calibrated else ""
                 emoji = {"ok":"🟢","warning":"🟡","exhausted":"🔴"}.get(status,"⚪")
-                quota_lines.append(f"  {emoji} {p}: {used}/{lim_str} used ({pct_str}) — today {today} — status {status}")
-            quota_lines.append("  Guidance: at 🟡 warning (≥80%), avoid /best-of-n multi-sample dispatches. At 🔴 exhausted (≥95%), defer non-urgent delegations to the provider and/or switch to the other provider where possible.")
+                quota_lines.append(f"  {emoji} {p}: {used}/{lim_str} used ({pct_str}){cal_str} — today {today} — status {status}")
+            quota_lines.append("  Guidance: at 🟡 warning (≥80%), avoid /best-of-n multi-sample dispatches. At 🔴 exhausted (≥95%), defer non-urgent delegations to the provider and/or switch to the other provider where possible. Tune ~/.claude-dual/quota-limits.json to match your actual plan limits.")
             lines.extend(quota_lines)
 except Exception:
     pass

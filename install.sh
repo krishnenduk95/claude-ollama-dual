@@ -40,6 +40,25 @@ ok "Ollama $(ollama -v 2>&1 | head -1 | awk '{print $NF}')"
 command -v claude >/dev/null 2>&1 || die "Claude Code CLI not found. Install: https://docs.claude.com/en/docs/claude-code"
 ok "Claude Code $(claude --version 2>&1 | head -1)"
 
+# Hard requirement: python3 is used by every hook. Without it they silently
+# no-op and the stack degrades to v1.0 behavior (no learnings, no quota, no
+# drift detection, no routing stats). Fail loudly rather than half-install.
+command -v python3 >/dev/null 2>&1 || die "python3 not found. All hooks (learnings, quota, drift, routing stats) require python3. Install via: brew install python3 (macOS) or apt install python3 (Linux)"
+PY_MAJOR=$(python3 -c 'import sys;print(sys.version_info.major)')
+PY_MINOR=$(python3 -c 'import sys;print(sys.version_info.minor)')
+if [ "$PY_MAJOR" -lt 3 ] || { [ "$PY_MAJOR" -eq 3 ] && [ "$PY_MINOR" -lt 7 ]; }; then
+  die "python3 too old: $(python3 --version). Need 3.7+. Upgrade via: brew upgrade python3 / apt install python3.11"
+fi
+ok "python3 $(python3 --version 2>&1 | awk '{print $NF}')"
+
+# jq is optional but strongly recommended — without it we can't merge into
+# existing settings.json. Warn clearly so users know what they're missing.
+if command -v jq >/dev/null 2>&1; then
+  ok "jq $(jq --version 2>&1)"
+else
+  warn "jq not found — if you already have a ~/.claude/settings.json, hook wiring will be skipped and you'll need to add hooks manually. Install: brew install jq (macOS) or apt install jq (Linux)"
+fi
+
 curl -sf http://localhost:11434/api/tags >/dev/null 2>&1 \
   && ok "Ollama daemon reachable on :11434" \
   || warn "Ollama daemon not running — start it with: ollama serve"
@@ -219,7 +238,10 @@ if [ -s "$SETTINGS" ]; then
     ' "$SETTINGS" > "$tmp" && mv "$tmp" "$SETTINGS"
     ok "effortLevel set to xhigh (jq)"
   else
-    warn "jq not installed — add \"effortLevel\":\"xhigh\" manually to $SETTINGS"
+    warn "jq not installed — can't merge into existing $SETTINGS"
+    warn "  Manually add: \"effortLevel\":\"xhigh\", \"model\":\"claude-opus-4-7\""
+    warn "  Manually wire hooks: PreToolUse (delegation-enforcer), UserPromptSubmit (deep-reason + best-of-n + fetch-learnings), SessionStart (inject-routing-stats), PostToolUse/Bash (verify-learnings), SubagentStop (plan-drift)"
+    warn "  Or: backup settings.json, rm it, re-run installer to get the bootstrap template"
   fi
 else
   cat > "$SETTINGS" <<'EOF'

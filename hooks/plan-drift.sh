@@ -19,15 +19,39 @@ python3 <<'PY'
 import json, os, re, sys, subprocess
 from pathlib import Path
 
+DEBUG = os.environ.get("CLAUDE_DEBUG") == "1"
+def dbg(msg):
+    if DEBUG:
+        sys.stderr.write(f"plan-drift[debug]: {msg}\n")
+
 payload = os.environ.get("HOOK_PAYLOAD", "")
 try:
     data = json.loads(payload)
-except Exception:
+except Exception as e:
+    dbg(f"payload parse failed: {e!r}")
     sys.exit(0)
 
-# SubagentStop payload shape varies — try to get transcript_path or messages
-transcript_path = data.get("transcript_path") or data.get("session_transcript_path")
-subagent_type = data.get("subagent_type") or data.get("agent_type") or ""
+# Re-entry guard: if CC has already called this hook in the current stop
+# cycle, don't loop. (Some CC versions set stop_hook_active.)
+if data.get("stop_hook_active"):
+    dbg("skip — stop_hook_active set")
+    sys.exit(0)
+
+# SubagentStop payload shape varies across CC versions — try every known field
+transcript_path = (
+    data.get("transcript_path")
+    or data.get("session_transcript_path")
+    or data.get("transcript")
+    or data.get("transcript_file")
+)
+subagent_type = (
+    data.get("subagent_type")
+    or data.get("agent_type")
+    or data.get("agent")
+    or data.get("sub_agent_type")
+    or ""
+)
+dbg(f"transcript={transcript_path!r} subagent={subagent_type!r}")
 
 # Only meaningful for GLM workers that actually touch code
 if not subagent_type.startswith("glm-"):
@@ -113,13 +137,24 @@ if not declared:
 if not declared:
     sys.exit(0)
 
+# Bail if not in a git repo — plan-drift only makes sense with version control.
+try:
+    subprocess.check_output(
+        ["git", "-C", repo, "rev-parse", "--git-dir"],
+        text=True, stderr=subprocess.DEVNULL, timeout=2
+    )
+except Exception:
+    dbg(f"not a git repo: {repo}")
+    sys.exit(0)
+
 # What did git actually change (uncommitted) in the working tree?
 try:
     changed = subprocess.check_output(
         ["git", "-C", repo, "status", "--porcelain=v1"],
         text=True, stderr=subprocess.DEVNULL, timeout=3
     )
-except Exception:
+except Exception as e:
+    dbg(f"git status failed: {e!r}")
     sys.exit(0)
 
 actual = set()

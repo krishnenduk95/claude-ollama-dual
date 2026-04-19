@@ -24,13 +24,19 @@ audit = "$AUDIT"
 limits_path = "$LIMITS"
 out = "$OUT"
 
-# Defaults
-limits = {"ollama": {"weekly": 1200}, "anthropic": {"weekly": 4500}}
+# Defaults — deliberately high so the warning only fires on real overuse.
+# Users with tighter plans override via ~/.claude-dual/quota-limits.json.
+# If that file doesn't exist, we self-calibrate after first week: take the
+# max of defaults and 1.5× observed 7d usage, so "normal" never trips.
+limits = {"ollama": {"weekly": 14000}, "anthropic": {"weekly": 4500}}
+user_configured = False
 if os.path.exists(limits_path):
     try:
         user_limits = json.load(open(limits_path))
+        user_configured = True
         for k, v in user_limits.items():
-            limits.setdefault(k, {}).update(v)
+            if isinstance(v, dict):
+                limits.setdefault(k, {}).update(v)
     except Exception:
         pass
 
@@ -67,6 +73,18 @@ result = {
     "generated_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
     "providers": {},
 }
+
+# Auto-calibrate: if user hasn't set custom limits AND observed usage already
+# exceeds defaults, bump the default so steady-state usage doesn't trip.
+# This is pure heuristic — user should still tune quota-limits.json to match
+# their real plan, but this prevents spam warnings on first few sessions.
+if not user_configured:
+    for provider, wk in weekly.items():
+        lim = limits.get(provider, {}).get("weekly")
+        if lim and wk > lim * 0.8:
+            limits.setdefault(provider, {})["weekly"] = int(wk * 1.5)
+            limits[provider]["_auto_calibrated"] = True
+
 for provider, dmap in daily.items():
     wk = weekly.get(provider, 0)
     lim = limits.get(provider, {}).get("weekly")
@@ -82,6 +100,7 @@ for provider, dmap in daily.items():
         "weekly_limit": lim,
         "weekly_pct": pct,
         "status": status,
+        "auto_calibrated": limits.get(provider, {}).get("_auto_calibrated", False),
         "today": dmap.get(today.isoformat(), 0),
         "daily_7d": [
             {"date": (today - datetime.timedelta(days=i)).isoformat(),
