@@ -63,6 +63,35 @@ cp "$REPO_DIR/proxy/proxy.js"         "$HOME/.claude-dual/proxy.js";      ok "pr
 cp "$REPO_DIR/proxy/package.json"     "$HOME/.claude-dual/package.json";  ok "package.json → ~/.claude-dual/package.json"
 cp "$REPO_DIR/hooks/delegation-enforcer.sh" "$HOME/.claude-dual/delegation-enforcer.sh"
 chmod +x "$HOME/.claude-dual/delegation-enforcer.sh";                     ok "delegation enforcer → ~/.claude-dual/delegation-enforcer.sh"
+cp "$REPO_DIR/hooks/deep-reason-detector.sh" "$HOME/.claude-dual/deep-reason-detector.sh"
+chmod +x "$HOME/.claude-dual/deep-reason-detector.sh";                    ok "deep-reason detector → ~/.claude-dual/deep-reason-detector.sh"
+cp "$REPO_DIR/hooks/best-of-n-detector.sh" "$HOME/.claude-dual/best-of-n-detector.sh"
+chmod +x "$HOME/.claude-dual/best-of-n-detector.sh";                      ok "best-of-n detector → ~/.claude-dual/best-of-n-detector.sh"
+cp "$REPO_DIR/hooks/compute-routing-stats.sh" "$HOME/.claude-dual/compute-routing-stats.sh"
+chmod +x "$HOME/.claude-dual/compute-routing-stats.sh";                   ok "routing stats compute → ~/.claude-dual/compute-routing-stats.sh"
+cp "$REPO_DIR/hooks/inject-routing-stats.sh" "$HOME/.claude-dual/inject-routing-stats.sh"
+chmod +x "$HOME/.claude-dual/inject-routing-stats.sh";                    ok "routing stats injector → ~/.claude-dual/inject-routing-stats.sh"
+cp "$REPO_DIR/hooks/write-learning.sh"  "$HOME/.claude-dual/write-learning.sh"
+chmod +x "$HOME/.claude-dual/write-learning.sh";                          ok "learnings writer → ~/.claude-dual/write-learning.sh"
+cp "$REPO_DIR/hooks/fetch-learnings.sh" "$HOME/.claude-dual/fetch-learnings.sh"
+chmod +x "$HOME/.claude-dual/fetch-learnings.sh";                         ok "learnings fetcher → ~/.claude-dual/fetch-learnings.sh"
+
+# ── Learnings fabric: create memory dir + seed if empty ───────────
+mkdir -p "$HOME/.claude-dual/memory"
+LEARN_FILE="$HOME/.claude-dual/memory/learnings.jsonl"
+if [ ! -f "$LEARN_FILE" ] || [ ! -s "$LEARN_FILE" ]; then
+  "$HOME/.claude-dual/write-learning.sh" "bootstrap" "init" "success" "learnings fabric initialized on install" "" "init,bootstrap" >/dev/null 2>&1 || true
+  ok "learnings fabric seeded → ~/.claude-dual/memory/learnings.jsonl"
+else
+  ok "learnings fabric already present → ~/.claude-dual/memory/learnings.jsonl"
+fi
+
+# ── Knowledge packs (SaaS subagents consult these) ─────────────────
+if [ -d "$REPO_DIR/knowledge" ]; then
+  mkdir -p "$HOME/.claude-dual/knowledge"
+  cp -R "$REPO_DIR/knowledge/." "$HOME/.claude-dual/knowledge/"
+  ok "knowledge packs → ~/.claude-dual/knowledge/"
+fi
 
 # Install npm deps for structured logging + metrics (optional but recommended)
 if command -v npm >/dev/null 2>&1; then
@@ -74,11 +103,19 @@ else
   warn "npm not found — proxy will fall back to basic logging (still functional)"
 fi
 
-cp "$REPO_DIR/agents/glm-worker.md"   "$HOME/.claude/agents/";            ok "agent → ~/.claude/agents/glm-worker.md"
-cp "$REPO_DIR/agents/glm-explorer.md" "$HOME/.claude/agents/";            ok "agent → ~/.claude/agents/glm-explorer.md"
-cp "$REPO_DIR/agents/glm-reviewer.md" "$HOME/.claude/agents/";            ok "agent → ~/.claude/agents/glm-reviewer.md"
-cp "$REPO_DIR/agents/glm-analyst.md"  "$HOME/.claude/agents/";            ok "agent → ~/.claude/agents/glm-analyst.md"
-cp "$REPO_DIR/commands/orchestrate.md" "$HOME/.claude/commands/";         ok "slash → ~/.claude/commands/orchestrate.md"
+cp "$REPO_DIR/agents/glm-worker.md"           "$HOME/.claude/agents/";    ok "agent → ~/.claude/agents/glm-worker.md"
+cp "$REPO_DIR/agents/glm-explorer.md"         "$HOME/.claude/agents/";    ok "agent → ~/.claude/agents/glm-explorer.md"
+cp "$REPO_DIR/agents/glm-reviewer.md"         "$HOME/.claude/agents/";    ok "agent → ~/.claude/agents/glm-reviewer.md"
+cp "$REPO_DIR/agents/glm-analyst.md"          "$HOME/.claude/agents/";    ok "agent → ~/.claude/agents/glm-analyst.md"
+cp "$REPO_DIR/agents/glm-architect.md"        "$HOME/.claude/agents/";    ok "agent → ~/.claude/agents/glm-architect.md"
+cp "$REPO_DIR/agents/glm-api-designer.md"     "$HOME/.claude/agents/";    ok "agent → ~/.claude/agents/glm-api-designer.md"
+cp "$REPO_DIR/agents/glm-ui-builder.md"       "$HOME/.claude/agents/";    ok "agent → ~/.claude/agents/glm-ui-builder.md"
+cp "$REPO_DIR/agents/glm-test-generator.md"   "$HOME/.claude/agents/";    ok "agent → ~/.claude/agents/glm-test-generator.md"
+cp "$REPO_DIR/agents/glm-security-auditor.md" "$HOME/.claude/agents/";    ok "agent → ~/.claude/agents/glm-security-auditor.md"
+cp "$REPO_DIR/commands/orchestrate.md"  "$HOME/.claude/commands/";        ok "slash → ~/.claude/commands/orchestrate.md"
+cp "$REPO_DIR/commands/saas-build.md"   "$HOME/.claude/commands/";        ok "slash → ~/.claude/commands/saas-build.md"
+cp "$REPO_DIR/commands/deep-reason.md"  "$HOME/.claude/commands/";        ok "slash → ~/.claude/commands/deep-reason.md"
+cp "$REPO_DIR/commands/best-of-n.md"    "$HOME/.claude/commands/";        ok "slash → ~/.claude/commands/best-of-n.md"
 cp "$REPO_DIR/bin/claude-dual"         "$HOME/.local/bin/claude-dual"
 chmod +x "$HOME/.local/bin/claude-dual";                                  ok "launcher → ~/.local/bin/claude-dual"
 
@@ -128,7 +165,30 @@ if [ -s "$SETTINGS" ]; then
     ok "effortLevel already xhigh"
   elif command -v jq >/dev/null 2>&1; then
     tmp="$(mktemp)"
-    jq '. + {"effortLevel":"xhigh","alwaysThinkingEnabled":false,"model":"claude-opus-4-7"} | .hooks.PreToolUse = ((.hooks.PreToolUse // []) + [{"matcher":"Read|Edit|Write|Grep|Glob","hooks":[{"type":"command","command":"~/.claude-dual/delegation-enforcer.sh","timeout":5000}]}] | unique_by(.matcher))' "$SETTINGS" > "$tmp" && mv "$tmp" "$SETTINGS"
+    jq '
+      . + {"effortLevel":"xhigh","alwaysThinkingEnabled":false,"model":"claude-opus-4-7"}
+      | .hooks.PreToolUse = (
+          (.hooks.PreToolUse // [])
+          + [{"matcher":"Read|Edit|Write|Grep|Glob","hooks":[{"type":"command","command":"~/.claude-dual/delegation-enforcer.sh","timeout":5000}]}]
+          | unique_by(.matcher)
+        )
+      | .hooks.UserPromptSubmit = (
+          (.hooks.UserPromptSubmit // [])
+          + [{"matcher":"","hooks":[
+                {"type":"command","command":"~/.claude-dual/deep-reason-detector.sh","timeout":3000},
+                {"type":"command","command":"~/.claude-dual/best-of-n-detector.sh","timeout":3000},
+                {"type":"command","command":"~/.claude-dual/fetch-learnings.sh","timeout":3000}
+              ]}]
+          | unique_by(.matcher)
+        )
+      | .hooks.SessionStart = (
+          (.hooks.SessionStart // [])
+          + [{"matcher":"","hooks":[
+                {"type":"command","command":"~/.claude-dual/inject-routing-stats.sh","timeout":5000}
+              ]}]
+          | unique_by(.matcher)
+        )
+    ' "$SETTINGS" > "$tmp" && mv "$tmp" "$SETTINGS"
     ok "effortLevel set to xhigh (jq)"
   else
     warn "jq not installed — add \"effortLevel\":\"xhigh\" manually to $SETTINGS"
@@ -145,6 +205,24 @@ else
         "matcher": "Read|Edit|Write|Grep|Glob",
         "hooks": [
           { "type": "command", "command": "~/.claude-dual/delegation-enforcer.sh", "timeout": 5000 }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          { "type": "command", "command": "~/.claude-dual/deep-reason-detector.sh", "timeout": 3000 },
+          { "type": "command", "command": "~/.claude-dual/best-of-n-detector.sh", "timeout": 3000 },
+          { "type": "command", "command": "~/.claude-dual/fetch-learnings.sh", "timeout": 3000 }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          { "type": "command", "command": "~/.claude-dual/inject-routing-stats.sh", "timeout": 5000 }
         ]
       }
     ]

@@ -204,3 +204,15 @@ Mark `depends:` explicitly on each subtask. Subtasks with no shared deps can run
 - Cite specific numbers wherever possible (expected load, SLA, cost, capacity). "High" is not a number.
 - Never design for hypothetical future scale not in the brief. YAGNI at the architecture level too.
 - If the scope is larger than one plan file (more than ~10 subtasks or crossing multiple major domains), split it: produce plans/NNN through NNN+2 and note their relationship.
+
+# LEARNINGS FABRIC (mandatory at plan exit)
+
+After writing the plan file, append ONE architectural learning to the shared memory:
+
+```bash
+~/.claude-dual/write-learning.sh "glm-architect" "<decision-slug>" "<success|partial>" "<what-worked-short>" "" "tag1,tag2,tag3"
+```
+
+Log the KEY architectural decision and WHY it won (e.g. "shared-schema + RLS over schema-per-tenant for 3-engineer team — operational burden of migrations across N schemas was the decider"). Tags = tech + domain + scale (e.g. `postgres,multi-tenancy,rls,saas,small-team`).
+
+Skip trivial plans. Only log decisions where the tradeoff mattered.
