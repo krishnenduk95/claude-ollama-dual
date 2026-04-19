@@ -1,0 +1,11 @@
+{
+  "_comment": "Default quota limits used by compute-quota.sh. Copied to ~/.claude-dual/quota-limits.json by install.sh on first install. Tune these to your actual plan.",
+  "ollama": {
+    "weekly": 14000,
+    "_note": "Ollama Cloud paid tier: ~2000 req/day × 7 = 14000/week. Free tier is lower — set to 1200 if unsure."
+  },
+  "anthropic": {
+    "weekly": 4500,
+    "_note": "Claude Max 20x tier: ~4500 Opus messages rolling 7 days. Claude Max 5x is ~1500. Adjust per your subscription."
+  }
+}

@@ -68,12 +68,31 @@ for anti in ["quick", "prototype", "rough", "draft", "sketch", "throwaway",
 if score < 4:
     sys.exit(0)
 
+# Quota gate: best-of-n burns GLM quota at 3× the normal rate. If the Ollama
+# budget is already >=95% used, suppress. If >=80%, append a caveat.
+quota_note = ""
+try:
+    qpath = os.path.expanduser("~/.claude-dual/quota.json")
+    if os.path.exists(qpath):
+        with open(qpath) as f:
+            q = json.load(f)
+        oll = q.get("providers", {}).get("ollama", {})
+        status = oll.get("status", "ok")
+        pct = oll.get("weekly_pct")
+        if status == "exhausted":
+            sys.exit(0)  # silent — do not propose 3× dispatch when quota is blown
+        if status == "warning":
+            quota_note = f" ⚠ Ollama quota at {pct}% — the 3× cost may not be justified unless correctness is critical."
+except Exception:
+    pass
+
 msg = (
   "⚡ BEST-OF-N CANDIDATE: the incoming task shows "
   f"{len(matched)} hard-task signals ({', '.join(matched[:5])}). "
   "If correctness dominates cost here, consider invoking /best-of-n — "
   "dispatch glm-worker 3× with varied approaches, score with glm-reviewer, "
   "merge the winner. Skip if this is a prototype, a trivial edit, or quota-constrained."
+  + quota_note
 )
 
 out = {

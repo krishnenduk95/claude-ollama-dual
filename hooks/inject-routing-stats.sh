@@ -7,12 +7,18 @@ set -eu
 
 STATS_FILE="${HOME}/.claude-dual/routing-stats.json"
 COMPUTE_SCRIPT="${HOME}/.claude-dual/compute-routing-stats.sh"
+QUOTA_FILE="${HOME}/.claude-dual/quota.json"
+QUOTA_SCRIPT="${HOME}/.claude-dual/compute-quota.sh"
 
 # Refresh stats if script exists and file is missing or older than 1 hour
 if [ -x "$COMPUTE_SCRIPT" ]; then
   if [ ! -f "$STATS_FILE" ] || [ "$(find "$STATS_FILE" -mmin +60 2>/dev/null | wc -l | tr -d ' ')" = "1" ]; then
     "$COMPUTE_SCRIPT" >/dev/null 2>&1 || true
   fi
+fi
+# Refresh quota (cheaper — do it every session start)
+if [ -x "$QUOTA_SCRIPT" ]; then
+  "$QUOTA_SCRIPT" >/dev/null 2>&1 || true
 fi
 
 [ -f "$STATS_FILE" ] || exit 0
@@ -22,6 +28,7 @@ python3 <<PY
 import json, os, sys
 
 path = "$STATS_FILE"
+quota_path = "$QUOTA_FILE"
 try:
     with open(path) as f:
         stats = json.load(f)
@@ -67,6 +74,29 @@ if agents:
             lines.append(f"  {agent}: " + ", ".join(cells))
 
 lines.append("\nUse these as a prior when choosing which subagent to dispatch. Low-sample cells (n<5) are suggestive, not conclusive. Anything flagged ⚠ (success <80%) warrants extra Opus review before accepting the output.")
+
+# Quota budget summary — surface warnings/exhausted states so Opus adjusts dispatch strategy.
+try:
+    if os.path.exists(quota_path):
+        with open(quota_path) as f:
+            q = json.load(f)
+        providers = q.get("providers", {})
+        if providers:
+            quota_lines = ["\n💰 QUOTA BUDGET (rolling 7d, from ~/.claude-dual/quota.json):"]
+            for p, d in providers.items():
+                used = d.get("weekly_used", 0)
+                lim  = d.get("weekly_limit")
+                pct  = d.get("weekly_pct")
+                status = d.get("status", "ok")
+                today = d.get("today", 0)
+                lim_str = str(lim) if lim else "?"
+                pct_str = f"{pct}%" if pct is not None else "?"
+                emoji = {"ok":"🟢","warning":"🟡","exhausted":"🔴"}.get(status,"⚪")
+                quota_lines.append(f"  {emoji} {p}: {used}/{lim_str} used ({pct_str}) — today {today} — status {status}")
+            quota_lines.append("  Guidance: at 🟡 warning (≥80%), avoid /best-of-n multi-sample dispatches. At 🔴 exhausted (≥95%), defer non-urgent delegations to the provider and/or switch to the other provider where possible.")
+            lines.extend(quota_lines)
+except Exception:
+    pass
 
 out = {
   "hookSpecificOutput": {
