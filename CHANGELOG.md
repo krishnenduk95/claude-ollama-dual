@@ -6,6 +6,10 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Fixed
+
+- **Proxy v1.17.1 — prompt cache TTL ordering.** When an upstream client (e.g. Claude Code) pre-marked an earlier block with `cache_control.ttl='1h'`, the v1.17.0 auto-injector stamped a default `'5m'` breakpoint on a later block in the same section, which Anthropic rejects with HTTP 400 (`ttl='1h' cache_control block must not come after a ttl='5m' cache_control block`). The injector now detects existing TTLs per section (tools / system / messages) and, when a `1h` breakpoint is already present, promotes its own additions to `1h` so the ordering constraint is preserved. Regression tests added in `proxy/test-v15-v17.js`.
+
 ### Planned
 
 - Docker image + compose file for containerized deployment

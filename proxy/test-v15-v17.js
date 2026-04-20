@@ -22,6 +22,11 @@ const CFG = {
   SMART_ROUTING_HAIKU_MAX_INPUT_CHARS: 4000,
   SMART_ROUTING_SONNET_MAX_INPUT_CHARS: 20000,
 };
+// Helpers used by injectPromptCaching must be defined in this scope before
+// we eval the function, because eval captures the current lexical environment.
+const _detectExistingTtl = eval(`(${extract('_detectExistingTtl')})`);
+const _safeTtlFor        = eval(`(${extract('_safeTtlFor')})`);
+const _mkCacheControl    = eval(`(${extract('_mkCacheControl')})`);
 const injectPromptCaching = eval(`(${extract('injectPromptCaching')})`);
 const compressContext    = eval(`(${extract('compressContext')})`);
 const smartRoute         = eval(`(${extract('smartRoute')})`);
@@ -157,6 +162,64 @@ t('adds message-level breakpoints on long histories', () => {
 t('short histories do not add message breakpoints', () => {
   const { breakpoints } = injectPromptCaching({ system: 'sys', messages: [{ role: 'user', content: 'hi' }] });
   eq(breakpoints, 1);
+});
+
+// Regression: Anthropic rejects a 5m cache_control block that appears AFTER
+// a 1h cache_control block within the same section (tools/system/messages).
+// Upstream clients (Claude Code) sometimes pre-mark an earlier system entry
+// with ttl='1h'. Our injector must NOT then stamp ttl='5m' on a later entry.
+t('preserves 1h ttl when upstream already marked system with 1h', () => {
+  const parsed = {
+    system: [
+      { type: 'text', text: 'stable preamble', cache_control: { type: 'ephemeral', ttl: '1h' } },
+      { type: 'text', text: 'dynamic tail' },
+    ],
+  };
+  injectPromptCaching(parsed);
+  const tail = parsed.system[parsed.system.length - 1];
+  eq(tail.cache_control, { type: 'ephemeral', ttl: '1h' }, 'tail must match 1h to preserve ordering');
+});
+
+t('preserves 1h ttl when upstream already marked tools with 1h', () => {
+  const parsed = {
+    system: 'sys',
+    tools: [
+      { name: 'A', cache_control: { type: 'ephemeral', ttl: '1h' } },
+      { name: 'B' },
+    ],
+  };
+  injectPromptCaching(parsed);
+  eq(parsed.tools[1].cache_control, { type: 'ephemeral', ttl: '1h' });
+});
+
+t('preserves 1h ttl across messages when upstream pre-marked a message with 1h', () => {
+  const msgs = [];
+  for (let i = 0; i < 8; i++) {
+    msgs.push({ role: i % 2 ? 'assistant' : 'user', content: `msg ${i}` });
+  }
+  // Pre-mark an early message with 1h.
+  msgs[0].content = [{ type: 'text', text: 'msg 0', cache_control: { type: 'ephemeral', ttl: '1h' } }];
+  injectPromptCaching({ system: 'sys', messages: msgs });
+  // Any cache_control we added must be 1h (not 5m) to avoid ordering violation.
+  for (const m of msgs) {
+    if (!Array.isArray(m.content)) continue;
+    for (const block of m.content) {
+      if (!block || !block.cache_control) continue;
+      eq(block.cache_control.ttl, '1h', 'every breakpoint must be 1h once upstream used 1h');
+    }
+  }
+});
+
+t('defaults to 5m (no ttl) when no pre-existing 1h breakpoint', () => {
+  const parsed = {
+    system: [
+      { type: 'text', text: 'stable preamble' },
+      { type: 'text', text: 'dynamic tail' },
+    ],
+  };
+  injectPromptCaching(parsed);
+  const tail = parsed.system[parsed.system.length - 1];
+  eq(tail.cache_control, { type: 'ephemeral' }, 'no pre-existing 1h → default ephemeral (5m)');
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

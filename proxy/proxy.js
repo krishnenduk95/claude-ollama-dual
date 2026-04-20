@@ -267,32 +267,86 @@ function auditLog(entry) {
 //   4. a message roughly one-third into the history (early stable prefix)
 // Anthropic deduplicates breakpoints against a rolling session key, so each
 // marker converts its prefix into a cache HIT on subsequent turns.
+//
+// TTL ordering constraint: Anthropic requires that within a section (tools,
+// system, messages[]), all ttl='1h' cache_control blocks come BEFORE any
+// ttl='5m' blocks. If the upstream client already placed a '1h' breakpoint
+// in a section, any breakpoint we add later in that same section must also
+// be '1h' (or skipped). Default Anthropic ephemeral TTL is 5m.
+//
 // Returns { parsed, breakpoints } so handle() can audit coverage.
+
+// Walk a content array and return an existing cache_control TTL if any block
+// has one. Returns '1h', '5m', or null. Treats unspecified ttl as '5m'.
+function _detectExistingTtl(arr) {
+  if (!Array.isArray(arr)) return null;
+  let found = null;
+  for (const item of arr) {
+    if (!item || typeof item !== 'object') continue;
+    const cc = item.cache_control;
+    if (!cc || typeof cc !== 'object') continue;
+    const ttl = cc.ttl === '1h' ? '1h' : '5m';
+    if (ttl === '1h') return '1h'; // 1h dominates
+    found = ttl;
+  }
+  return found;
+}
+
+// Pick a TTL for a new breakpoint that won't violate ordering: if a '1h'
+// already exists in the section, match it; otherwise default to ephemeral 5m.
+function _safeTtlFor(existing) {
+  return existing === '1h' ? '1h' : null; // null = omit ttl (defaults to 5m)
+}
+
+function _mkCacheControl(existing) {
+  const ttl = _safeTtlFor(existing);
+  return ttl ? { type: 'ephemeral', ttl } : { type: 'ephemeral' };
+}
+
 function injectPromptCaching(parsed) {
   let breakpoints = 0;
   const MAX_BREAKPOINTS = 4;
 
+  // --- system ---
   if (typeof parsed.system === 'string' && parsed.system.length > 0) {
     parsed.system = [{ type: 'text', text: parsed.system, cache_control: { type: 'ephemeral' } }];
     breakpoints++;
   } else if (Array.isArray(parsed.system) && parsed.system.length > 0) {
+    const existingTtl = _detectExistingTtl(parsed.system);
     const last = parsed.system[parsed.system.length - 1];
     if (last && typeof last === 'object') {
-      if (!last.cache_control) last.cache_control = { type: 'ephemeral' };
+      if (!last.cache_control) last.cache_control = _mkCacheControl(existingTtl);
       breakpoints++;
     }
   }
 
+  // --- tools ---
   if (breakpoints < MAX_BREAKPOINTS && Array.isArray(parsed.tools) && parsed.tools.length > 0) {
+    const existingTtl = _detectExistingTtl(parsed.tools);
     const lastTool = parsed.tools[parsed.tools.length - 1];
     if (lastTool && typeof lastTool === 'object' && !lastTool.cache_control) {
-      lastTool.cache_control = { type: 'ephemeral' };
+      lastTool.cache_control = _mkCacheControl(existingTtl);
       breakpoints++;
     }
   }
 
+  // --- messages ---
+  // For messages, the TTL-ordering constraint applies across the flattened
+  // sequence of content blocks in order. Find whether any existing '1h'
+  // breakpoint sits AFTER the position we'd add to — if so, we must use '1h'
+  // too (or skip). Simplest safe rule: scan all message content blocks; if
+  // any '1h' exists anywhere, new message-level breakpoints also use '1h'.
   if (breakpoints < MAX_BREAKPOINTS && Array.isArray(parsed.messages) && parsed.messages.length >= 4) {
     const msgs = parsed.messages;
+    // Detect any pre-existing 1h ttl in messages so our additions can match.
+    let msgsTtl = null;
+    for (const m of msgs) {
+      if (!m || !Array.isArray(m.content)) continue;
+      const t = _detectExistingTtl(m.content);
+      if (t === '1h') { msgsTtl = '1h'; break; }
+      if (t === '5m') msgsTtl = '5m';
+    }
+
     const candidates = [];
     const tail = msgs.length - 3;
     if (tail >= 1) candidates.push(tail);
@@ -304,12 +358,12 @@ function injectPromptCaching(parsed) {
       const m = msgs[idx];
       if (!m || !m.content) continue;
       if (typeof m.content === 'string') {
-        m.content = [{ type: 'text', text: m.content, cache_control: { type: 'ephemeral' } }];
+        m.content = [{ type: 'text', text: m.content, cache_control: _mkCacheControl(msgsTtl) }];
         breakpoints++;
       } else if (Array.isArray(m.content) && m.content.length > 0) {
         const last = m.content[m.content.length - 1];
         if (last && typeof last === 'object' && !last.cache_control) {
-          last.cache_control = { type: 'ephemeral' };
+          last.cache_control = _mkCacheControl(msgsTtl);
           breakpoints++;
         }
       }
