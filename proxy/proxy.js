@@ -488,6 +488,31 @@ function compressContext(parsed) {
 }
 
 // ── Rigor injection for GLM ──────────────────────────────────────────────
+// v1.18.0: also clamp max_tokens down to the model's known output ceiling.
+// Claude Code's subagent harness routinely sends max_tokens=128000, which is
+// fine for Claude models but exceeds the per-model output cap on several
+// Ollama cloud models (deepseek-v3.2:cloud → 65536, etc.), causing 400s.
+// We clamp per-model using a whitelist; unknown models fall back to a safe
+// universal ceiling (60000) so a new model shipping with a lower cap still
+// works on day one. Clamping only reduces; we never raise max_tokens above
+// the caller's value.
+const MODEL_MAX_OUTPUT = {
+  // Verified: deepseek-v3.2:cloud rejects >65536 (reported today).
+  'deepseek-v3.2:cloud': 65536,
+  // Conservative defaults for other Ollama cloud models. Update as verified.
+  'glm-5.1:cloud': 98304,
+  'kimi-k2.5:cloud': 131072,
+  'qwen3-coder-next:cloud': 65536,
+  'cogito-2.1:671b-cloud': 65536,
+};
+const SAFE_MAX_OUTPUT_FALLBACK = 60000;
+
+function _ceilingFor(model) {
+  if (typeof model !== 'string' || !model) return SAFE_MAX_OUTPUT_FALLBACK;
+  if (MODEL_MAX_OUTPUT[model] != null) return MODEL_MAX_OUTPUT[model];
+  return SAFE_MAX_OUTPUT_FALLBACK;
+}
+
 function applyGlmRigor(parsed) {
   if (!parsed.thinking) {
     parsed.thinking = { type: 'enabled', budget_tokens: CFG.GLM_THINKING_BUDGET };
@@ -499,6 +524,16 @@ function applyGlmRigor(parsed) {
   }
   if (!parsed.max_tokens || parsed.max_tokens < CFG.GLM_MAX_TOKENS_FLOOR) {
     parsed.max_tokens = Math.max(parsed.max_tokens || 0, CFG.GLM_MAX_TOKENS_FLOOR);
+  }
+  // Clamp down to per-model ceiling. thinking.budget_tokens must also fit
+  // within max_tokens, otherwise Ollama/Anthropic may reject — shrink both.
+  const ceiling = _ceilingFor(parsed.model);
+  if (parsed.max_tokens > ceiling) parsed.max_tokens = ceiling;
+  if (parsed.thinking && parsed.thinking.type === 'enabled' &&
+      typeof parsed.thinking.budget_tokens === 'number' &&
+      parsed.thinking.budget_tokens >= parsed.max_tokens) {
+    // Leave room for at least 1 output token — keep thinking ≤ max_tokens - 1024.
+    parsed.thinking.budget_tokens = Math.max(1024, parsed.max_tokens - 1024);
   }
   return parsed;
 }

@@ -21,6 +21,9 @@ const CFG = {
   SMART_ROUTING: true,
   SMART_ROUTING_HAIKU_MAX_INPUT_CHARS: 4000,
   SMART_ROUTING_SONNET_MAX_INPUT_CHARS: 20000,
+  GLM_THINKING_BUDGET: 32000,
+  GLM_TEMPERATURE: 0.3,
+  GLM_MAX_TOKENS_FLOOR: 8192,
 };
 // Helpers used by injectPromptCaching must be defined in this scope before
 // we eval the function, because eval captures the current lexical environment.
@@ -31,6 +34,21 @@ const _countExistingBreakpoints = eval(`(${extract('_countExistingBreakpoints')}
 const injectPromptCaching = eval(`(${extract('injectPromptCaching')})`);
 const compressContext    = eval(`(${extract('compressContext')})`);
 const smartRoute         = eval(`(${extract('smartRoute')})`);
+// v1.18.0: applyGlmRigor depends on MODEL_MAX_OUTPUT,
+// SAFE_MAX_OUTPUT_FALLBACK, and _ceilingFor. Extract the module-level
+// constants by eval'ing the source lines directly; eval'ing a `function`
+// block is enough for _ceilingFor but `const` bindings aren't captured by
+// the `function` regex — load them from source with a small extractor.
+function extractConstBlock(name) {
+  const re = new RegExp(`const ${name}\\s*=\\s*([^;]*?);`, 'm');
+  const m = src.match(re);
+  if (!m) throw new Error(`could not extract const ${name}`);
+  return m[1];
+}
+const MODEL_MAX_OUTPUT      = eval(`(${extractConstBlock('MODEL_MAX_OUTPUT')})`);
+const SAFE_MAX_OUTPUT_FALLBACK = eval(`(${extractConstBlock('SAFE_MAX_OUTPUT_FALLBACK')})`);
+const _ceilingFor           = eval(`(${extract('_ceilingFor')})`);
+const applyGlmRigor         = eval(`(${extract('applyGlmRigor')})`);
 
 let passed = 0, failed = 0;
 function t(name, fn) {
@@ -289,6 +307,52 @@ t('fills remaining budget when upstream placed fewer than 4', () => {
   assert(breakpoints <= 2, `added at most 2, got ${breakpoints}`);
   const total = _countExistingBreakpoints(parsed);
   assert(total <= 4, `total ≤4, got ${total}`);
+});
+
+console.log('\nv1.18 applyGlmRigor max_tokens clamp:');
+t('clamps 128000 down to deepseek-v3.2:cloud ceiling (65536)', () => {
+  const parsed = { model: 'deepseek-v3.2:cloud', max_tokens: 128000 };
+  applyGlmRigor(parsed);
+  eq(parsed.max_tokens, 65536);
+});
+
+t('clamps 128000 down to glm-5.1:cloud ceiling (98304)', () => {
+  const parsed = { model: 'glm-5.1:cloud', max_tokens: 128000 };
+  applyGlmRigor(parsed);
+  eq(parsed.max_tokens, 98304);
+});
+
+t('unknown model falls back to SAFE_MAX_OUTPUT_FALLBACK (60000)', () => {
+  const parsed = { model: 'some-future-model:cloud', max_tokens: 128000 };
+  applyGlmRigor(parsed);
+  eq(parsed.max_tokens, 60000);
+  eq(_ceilingFor('some-future-model:cloud'), 60000);
+});
+
+t('does not raise max_tokens when caller was already below ceiling', () => {
+  const parsed = { model: 'deepseek-v3.2:cloud', max_tokens: 16000 };
+  applyGlmRigor(parsed);
+  eq(parsed.max_tokens, 16000, 'clamp only reduces; never raises');
+});
+
+t('shrinks thinking.budget_tokens when it exceeds clamped max_tokens', () => {
+  // Caller asked for 128000 + thinking.budget=64000. After clamp to 65536,
+  // thinking must fit inside max_tokens with headroom for output.
+  const parsed = {
+    model: 'deepseek-v3.2:cloud',
+    max_tokens: 128000,
+    thinking: { type: 'enabled', budget_tokens: 64000 },
+  };
+  applyGlmRigor(parsed);
+  eq(parsed.max_tokens, 65536);
+  assert(parsed.thinking.budget_tokens < parsed.max_tokens,
+    `thinking.budget_tokens (${parsed.thinking.budget_tokens}) must be < max_tokens (${parsed.max_tokens})`);
+});
+
+t('applies floor when caller sent a too-small max_tokens', () => {
+  const parsed = { model: 'glm-5.1:cloud', max_tokens: 100 };
+  applyGlmRigor(parsed);
+  eq(parsed.max_tokens, 8192, 'floor wins when under floor');
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);
