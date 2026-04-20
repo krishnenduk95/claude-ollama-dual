@@ -334,7 +334,8 @@ Everything in one table so you can see exactly which model handles each role, wh
 | `glm-ui-builder` subagent | `glm-5.1:cloud` | Ollama | `subagent_type=glm-ui-builder` |
 | `glm-test-generator` subagent | `glm-5.1:cloud` | Ollama | `subagent_type=glm-test-generator` |
 | `glm-security-auditor` subagent | `glm-5.1:cloud` | Ollama | `subagent_type=glm-security-auditor` (auto-escalates findings back to Opus) |
-| **Alternate GLM models** you can route to | `deepseek-v3.2:cloud`, `kimi-k2.5:cloud`, `qwen3-coder-next:cloud`, `cogito-2.1:671b-cloud` | Ollama | Opt-in via subagent frontmatter `model:` or per-call override |
+
+> **Every `glm-*` subagent runs on `glm-5.1:cloud` by default** — the prefix reflects the model. Other Ollama-hosted cloud models (`deepseek-v3.2:cloud`, `kimi-k2.5:cloud`, `qwen3-coder-next:cloud`, `cogito-2.1:671b-cloud`) are supported by the proxy and can be opted into per-agent via frontmatter `model:`, but are not wired in by default. The proxy's per-model `max_tokens` clamp (v1.18.0) protects them from Claude Code's default 128k request.
 
 **Routing rules the proxy applies automatically:**
 
