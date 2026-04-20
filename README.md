@@ -312,6 +312,39 @@ When you type a prompt in a `claude-dual` session, Opus classifies the task usin
 - `thinking.budget_tokens: 32000` (extended reasoning — verified to lift GLM's thinking from ~5.9k chars baseline to ~18.8k chars on complex tasks)
 - `temperature: 0.3` (consistent reasoning)
 - `max_tokens` floor of 8192 (headroom for thinking + output)
+- `max_tokens` **ceiling clamp per model** (v1.18.0): `deepseek-v3.2:cloud → 65536`, `glm-5.1:cloud → 98304`, `kimi-k2.5:cloud → 131072`, `qwen3-coder-next:cloud → 65536`, `cogito-2.1:671b-cloud → 65536`. Unknown models fall back to `60000`. Clamping only reduces — never raises — and shrinks `thinking.budget_tokens` if needed to keep ≥1024 output tokens of headroom.
+
+---
+
+## Which model runs when
+
+Everything in one table so you can see exactly which model handles each role, what endpoint it hits, and when the proxy rewrites the model on the fly.
+
+| Role / trigger | Model | Endpoint | When it runs |
+|---|---|---|---|
+| **Main Claude Code session** (orchestrator you talk to) | `claude-opus-4-7` | `api.anthropic.com` via OAuth | Every user turn unless smart-routing downgrades it (see below) |
+| **Smart-routing downgrade** (v1.16.0) | `claude-sonnet-4-6` | `api.anthropic.com` | Opus request with `< 20,000` input chars and no `thinking.enabled` |
+| **Smart-routing downgrade** (v1.16.0) | `claude-haiku-4-5-20251001` | `api.anthropic.com` | Opus request with `< 4,000` input chars and no `thinking.enabled` |
+| `glm-worker` subagent (implementation from plan) | `glm-5.1:cloud` | `localhost:11434/v1/messages` (Ollama → Z.ai cloud) | Opus dispatches the Agent tool with `subagent_type=glm-worker` |
+| `glm-explorer` subagent (code investigation) | `glm-5.1:cloud` | Ollama | `subagent_type=glm-explorer` |
+| `glm-reviewer` subagent (diff / PR review) | `glm-5.1:cloud` | Ollama | `subagent_type=glm-reviewer` |
+| `glm-analyst` subagent (tradeoff analysis) | `glm-5.1:cloud` | Ollama | `subagent_type=glm-analyst` |
+| `glm-architect` subagent (SaaS plans) | `glm-5.1:cloud` | Ollama | `subagent_type=glm-architect` (v1.5 SaaS builder) |
+| `glm-api-designer` subagent | `glm-5.1:cloud` | Ollama | `subagent_type=glm-api-designer` |
+| `glm-ui-builder` subagent | `glm-5.1:cloud` | Ollama | `subagent_type=glm-ui-builder` |
+| `glm-test-generator` subagent | `glm-5.1:cloud` | Ollama | `subagent_type=glm-test-generator` |
+| `glm-security-auditor` subagent | `glm-5.1:cloud` | Ollama | `subagent_type=glm-security-auditor` (auto-escalates findings back to Opus) |
+| **Alternate GLM models** you can route to | `deepseek-v3.2:cloud`, `kimi-k2.5:cloud`, `qwen3-coder-next:cloud`, `cogito-2.1:671b-cloud` | Ollama | Opt-in via subagent frontmatter `model:` or per-call override |
+
+**Routing rules the proxy applies automatically:**
+
+1. **Pass-through by model name.** Anything matching `^claude-` goes to `api.anthropic.com` with your OAuth Bearer token forwarded untouched. Anything matching `^(glm-\|gemma\|qwen\|llama\|mistral\|phi\|deepseek)` or containing `:` goes to Ollama.
+2. **GLM rigor injection** (see above).
+3. **Smart routing** downgrades tiny Opus requests to Sonnet or Haiku — never upgrades. Thinking-enabled requests are never downgraded.
+4. **Context compression** (v1.15.0) dedupes old Read tool results and stubs stale large tool outputs before forwarding to Anthropic — reduces input tokens without touching recent turns.
+5. **Prompt cache breakpoints** (v1.17.x) are injected on stable prefixes (system prompt, tool defs, a mid-history message, a tail message), capped at 4 total across the whole request, with TTLs that preserve Anthropic's global `1h before 5m` ordering rule.
+
+**What you see on your side:** one `claude-dual` command. You never pick the model. Opus decides what to dispatch, the proxy decides what to rewrite.
 
 ---
 
