@@ -24,8 +24,8 @@ const CFG = {
 };
 // Helpers used by injectPromptCaching must be defined in this scope before
 // we eval the function, because eval captures the current lexical environment.
-const _detectExistingTtl = eval(`(${extract('_detectExistingTtl')})`);
-const _safeTtlFor        = eval(`(${extract('_safeTtlFor')})`);
+const _scanTtls          = eval(`(${extract('_scanTtls')})`);
+const _detectGlobalTtl   = eval(`(${extract('_detectGlobalTtl')})`);
 const _mkCacheControl    = eval(`(${extract('_mkCacheControl')})`);
 const injectPromptCaching = eval(`(${extract('injectPromptCaching')})`);
 const compressContext    = eval(`(${extract('compressContext')})`);
@@ -220,6 +220,37 @@ t('defaults to 5m (no ttl) when no pre-existing 1h breakpoint', () => {
   injectPromptCaching(parsed);
   const tail = parsed.system[parsed.system.length - 1];
   eq(tail.cache_control, { type: 'ephemeral' }, 'no pre-existing 1h → default ephemeral (5m)');
+});
+
+// v1.17.2 regression: ordering constraint is GLOBAL (tools → system →
+// messages). A 1h anywhere in the request means every breakpoint we add
+// must also be 1h, not just breakpoints in the same section.
+t('promotes tool breakpoint to 1h when system has a pre-existing 1h', () => {
+  const parsed = {
+    tools: [{ name: 'Read' }, { name: 'Write' }],
+    system: [
+      { type: 'text', text: 'stable', cache_control: { type: 'ephemeral', ttl: '1h' } },
+    ],
+  };
+  injectPromptCaching(parsed);
+  // Tool breakpoint must be 1h — otherwise tools=5m followed by system=1h violates order.
+  eq(parsed.tools[1].cache_control, { type: 'ephemeral', ttl: '1h' },
+    'tools breakpoint must match the 1h that exists in system');
+});
+
+t('promotes tool breakpoint to 1h when a message has a pre-existing 1h', () => {
+  const msgs = [];
+  for (let i = 0; i < 8; i++) {
+    msgs.push({ role: i % 2 ? 'assistant' : 'user', content: `msg ${i}` });
+  }
+  msgs[1].content = [{ type: 'text', text: 'msg 1', cache_control: { type: 'ephemeral', ttl: '1h' } }];
+  const parsed = { tools: [{ name: 'Read' }], system: 'sys', messages: msgs };
+  injectPromptCaching(parsed);
+  eq(parsed.tools[0].cache_control, { type: 'ephemeral', ttl: '1h' },
+    'tools breakpoint must match a 1h that lives deep in messages');
+  // System (promoted from string) must also be 1h, not 5m.
+  eq(parsed.system[0].cache_control, { type: 'ephemeral', ttl: '1h' },
+    'promoted system block must match the 1h elsewhere in the payload');
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);
