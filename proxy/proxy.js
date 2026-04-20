@@ -335,34 +335,56 @@ function _mkCacheControl(globalTtl) {
     : { type: 'ephemeral' };
 }
 
+// Count existing cache_control blocks in the entire request.
+// Anthropic caps at 4 total across tools + system + messages[].
+function _countExistingBreakpoints(parsed) {
+  let n = 0;
+  const countArr = (arr) => {
+    if (!Array.isArray(arr)) return;
+    for (const item of arr) {
+      if (!item || typeof item !== 'object') continue;
+      if (item.cache_control && typeof item.cache_control === 'object') n++;
+      if (Array.isArray(item.content)) countArr(item.content);
+    }
+  };
+  if (Array.isArray(parsed.tools)) countArr(parsed.tools);
+  if (Array.isArray(parsed.system)) countArr(parsed.system);
+  if (Array.isArray(parsed.messages)) countArr(parsed.messages);
+  return n;
+}
+
 function injectPromptCaching(parsed) {
-  let breakpoints = 0;
   const MAX_BREAKPOINTS = 4;
+  const existing = _countExistingBreakpoints(parsed);
+  let budget = Math.max(0, MAX_BREAKPOINTS - existing);
+  let added = 0;
   const globalTtl = _detectGlobalTtl(parsed);
 
   // --- system ---
   if (typeof parsed.system === 'string' && parsed.system.length > 0) {
-    parsed.system = [{ type: 'text', text: parsed.system, cache_control: _mkCacheControl(globalTtl) }];
-    breakpoints++;
+    if (budget > 0) {
+      parsed.system = [{ type: 'text', text: parsed.system, cache_control: _mkCacheControl(globalTtl) }];
+      added++; budget--;
+    }
   } else if (Array.isArray(parsed.system) && parsed.system.length > 0) {
     const last = parsed.system[parsed.system.length - 1];
-    if (last && typeof last === 'object') {
-      if (!last.cache_control) last.cache_control = _mkCacheControl(globalTtl);
-      breakpoints++;
+    if (budget > 0 && last && typeof last === 'object' && !last.cache_control) {
+      last.cache_control = _mkCacheControl(globalTtl);
+      added++; budget--;
     }
   }
 
   // --- tools ---
-  if (breakpoints < MAX_BREAKPOINTS && Array.isArray(parsed.tools) && parsed.tools.length > 0) {
+  if (budget > 0 && Array.isArray(parsed.tools) && parsed.tools.length > 0) {
     const lastTool = parsed.tools[parsed.tools.length - 1];
     if (lastTool && typeof lastTool === 'object' && !lastTool.cache_control) {
       lastTool.cache_control = _mkCacheControl(globalTtl);
-      breakpoints++;
+      added++; budget--;
     }
   }
 
   // --- messages ---
-  if (breakpoints < MAX_BREAKPOINTS && Array.isArray(parsed.messages) && parsed.messages.length >= 4) {
+  if (budget > 0 && Array.isArray(parsed.messages) && parsed.messages.length >= 4) {
     const msgs = parsed.messages;
     const candidates = [];
     const tail = msgs.length - 3;
@@ -371,23 +393,23 @@ function injectPromptCaching(parsed) {
     if (early >= 1 && early !== tail) candidates.push(early);
 
     for (const idx of candidates) {
-      if (breakpoints >= MAX_BREAKPOINTS) break;
+      if (budget <= 0) break;
       const m = msgs[idx];
       if (!m || !m.content) continue;
       if (typeof m.content === 'string') {
         m.content = [{ type: 'text', text: m.content, cache_control: _mkCacheControl(globalTtl) }];
-        breakpoints++;
+        added++; budget--;
       } else if (Array.isArray(m.content) && m.content.length > 0) {
         const last = m.content[m.content.length - 1];
         if (last && typeof last === 'object' && !last.cache_control) {
           last.cache_control = _mkCacheControl(globalTtl);
-          breakpoints++;
+          added++; budget--;
         }
       }
     }
   }
 
-  return { parsed, breakpoints };
+  return { parsed, breakpoints: added, existingBreakpoints: existing };
 }
 
 // ── v1.15.0: Context compression ─────────────────────────────────────────

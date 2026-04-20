@@ -27,6 +27,7 @@ const CFG = {
 const _scanTtls          = eval(`(${extract('_scanTtls')})`);
 const _detectGlobalTtl   = eval(`(${extract('_detectGlobalTtl')})`);
 const _mkCacheControl    = eval(`(${extract('_mkCacheControl')})`);
+const _countExistingBreakpoints = eval(`(${extract('_countExistingBreakpoints')})`);
 const injectPromptCaching = eval(`(${extract('injectPromptCaching')})`);
 const compressContext    = eval(`(${extract('compressContext')})`);
 const smartRoute         = eval(`(${extract('smartRoute')})`);
@@ -251,6 +252,43 @@ t('promotes tool breakpoint to 1h when a message has a pre-existing 1h', () => {
   // System (promoted from string) must also be 1h, not 5m.
   eq(parsed.system[0].cache_control, { type: 'ephemeral', ttl: '1h' },
     'promoted system block must match the 1h elsewhere in the payload');
+});
+
+// v1.17.3 regression: Anthropic caps total cache_control blocks at 4.
+// If upstream already placed breakpoints, we must not exceed the cap.
+t('respects the 4-breakpoint cap when upstream already placed some', () => {
+  const msgs = [];
+  for (let i = 0; i < 8; i++) {
+    msgs.push({ role: i % 2 ? 'assistant' : 'user', content: `msg ${i}` });
+  }
+  msgs[1].content = [{ type: 'text', text: 'msg 1', cache_control: { type: 'ephemeral' } }];
+  msgs[3].content = [{ type: 'text', text: 'msg 3', cache_control: { type: 'ephemeral' } }];
+  msgs[5].content = [{ type: 'text', text: 'msg 5', cache_control: { type: 'ephemeral' } }];
+  const parsed = {
+    tools: [{ name: 'Read', cache_control: { type: 'ephemeral' } }],
+    system: 'sys',
+    messages: msgs,
+  };
+  const { breakpoints, existingBreakpoints } = injectPromptCaching(parsed);
+  eq(existingBreakpoints, 4, 'counted 4 existing breakpoints');
+  eq(breakpoints, 0, 'added 0 because budget is exhausted');
+  const total = _countExistingBreakpoints(parsed);
+  assert(total <= 4, `total breakpoints should be ≤4, got ${total}`);
+});
+
+t('fills remaining budget when upstream placed fewer than 4', () => {
+  const msgs = [];
+  for (let i = 0; i < 10; i++) {
+    msgs.push({ role: i % 2 ? 'assistant' : 'user', content: `msg ${i}` });
+  }
+  msgs[2].content = [{ type: 'text', text: 'msg 2', cache_control: { type: 'ephemeral' } }];
+  msgs[4].content = [{ type: 'text', text: 'msg 4', cache_control: { type: 'ephemeral' } }];
+  const parsed = { tools: [{ name: 'Read' }], system: 'sys', messages: msgs };
+  const { breakpoints, existingBreakpoints } = injectPromptCaching(parsed);
+  eq(existingBreakpoints, 2, 'counted 2 existing');
+  assert(breakpoints <= 2, `added at most 2, got ${breakpoints}`);
+  const total = _countExistingBreakpoints(parsed);
+  assert(total <= 4, `total ≤4, got ${total}`);
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);
