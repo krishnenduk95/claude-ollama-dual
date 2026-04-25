@@ -56,7 +56,7 @@ jobs:
           severity: warning
           scandir: '.'
           check_together: 'yes'
-          ignore_paths: 'node_modules tests_quality plans .claude'
+          ignore_paths: 'node_modules proxy/node_modules tests_quality plans .claude'
 
   validate-service-files:
     name: service file validation

@@ -102,6 +102,10 @@ This prompt is reasoning-heavy (ranking / tradeoff / architecture / capacity dec
 If this prompt is actually a simple build/fix request that the detector mis-flagged, ignore this and proceed normally — but err toward dispatching: deep reasoning is the whole point of the stack.
 MSG
 
+# Prepend the trigger reason so the user/Opus can see WHY this fired —
+# also makes `reason` a live variable instead of a dead store.
+injection="(trigger: ${reason})"$'\n'"${injection}"
+
 # Emit hookSpecificOutput JSON (same protocol as delegation-enforcer v1.5.3)
 printf '%s' "$injection" | python3 -c '
 import json, sys

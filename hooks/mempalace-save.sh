@@ -84,20 +84,23 @@ INPUT=$(cat)
 # Parse all fields in a single Python call (3x faster than separate invocations)
 # SECURITY: All values are sanitized before being interpolated into shell assignments.
 # stop_hook_active is coerced to a strict True/False to prevent command injection via eval.
-eval $(echo "$INPUT" | "$MEMPAL_PYTHON_BIN" -c "
+# shellcheck disable=SC2046
+# Quoted via "$(...)"; the Python emits one KEY="value" line per field with a
+# regex sanitizer that strips anything outside [a-zA-Z0-9_/.\-~], so the eval
+# input is already safe. Quoting the command substitution keeps newlines so
+# eval parses each KEY=value as a separate assignment.
+eval "$(echo "$INPUT" | "$MEMPAL_PYTHON_BIN" -c '
 import sys, json, re
 data = json.load(sys.stdin)
-sid = data.get('session_id', 'unknown')
-sha_raw = data.get('stop_hook_active', False)
-tp = data.get('transcript_path', '')
-# Shell-safe output — only allow alphanumeric, underscore, hyphen, slash, dot, tilde
-safe = lambda s: re.sub(r'[^a-zA-Z0-9_/.\-~]', '', str(s))
-# Coerce stop_hook_active to strict boolean string
-sha = 'True' if sha_raw is True or str(sha_raw).lower() in ('true', '1', 'yes') else 'False'
-print(f'SESSION_ID=\"{safe(sid)}\"')
-print(f'STOP_HOOK_ACTIVE=\"{sha}\"')
-print(f'TRANSCRIPT_PATH=\"{safe(tp)}\"')
-" 2>/dev/null)
+sid = data.get("session_id", "unknown")
+sha_raw = data.get("stop_hook_active", False)
+tp = data.get("transcript_path", "")
+safe = lambda s: re.sub(r"[^a-zA-Z0-9_/.\-~]", "", str(s))
+sha = "True" if sha_raw is True or str(sha_raw).lower() in ("true", "1", "yes") else "False"
+print(f"SESSION_ID=\"{safe(sid)}\"")
+print(f"STOP_HOOK_ACTIVE=\"{sha}\"")
+print(f"TRANSCRIPT_PATH=\"{safe(tp)}\"")
+' 2>/dev/null)"
 
 # Expand ~ in path
 TRANSCRIPT_PATH="${TRANSCRIPT_PATH/#\~/$HOME}"
@@ -112,7 +115,7 @@ fi
 # Count human messages in the JSONL transcript
 # SECURITY: Pass transcript path as sys.argv to avoid shell injection via crafted paths
 if [ -f "$TRANSCRIPT_PATH" ]; then
-    EXCHANGE_COUNT=$("$MEMPAL_PYTHON_BIN" - "$TRANSCRIPT_PATH" <<'PYEOF'
+    EXCHANGE_COUNT=$("$MEMPAL_PYTHON_BIN" - "$TRANSCRIPT_PATH" 2>/dev/null <<'PYEOF'
 import json, sys
 count = 0
 with open(sys.argv[1]) as f:
@@ -129,7 +132,7 @@ with open(sys.argv[1]) as f:
             pass
 print(count)
 PYEOF
-2>/dev/null)
+)
 else
     EXCHANGE_COUNT=0
 fi

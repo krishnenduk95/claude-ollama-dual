@@ -13,7 +13,8 @@ set -eu
 
 payload=$(cat)
 export HOOK_PAYLOAD="$payload"
-export REPO_DIR="$(pwd)"
+REPO_DIR="$(pwd)"
+export REPO_DIR
 
 python3 <<'PY'
 import json, os, re, sys, subprocess

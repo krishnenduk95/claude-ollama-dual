@@ -300,8 +300,8 @@ fi
 
 # ── PATH check ─────────────────────────────────────────────────────
 case ":$PATH:" in
-  *":$HOME/.local/bin:"*) ok "~/.local/bin already on PATH" ;;
-  *) warn "~/.local/bin is NOT on PATH. Add to your shell rc: export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
+  *":$HOME/.local/bin:"*) ok "$HOME/.local/bin already on PATH" ;;
+  *) warn "$HOME/.local/bin is NOT on PATH. Add to your shell rc: export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
 esac
 
 # ── Verify ─────────────────────────────────────────────────────────

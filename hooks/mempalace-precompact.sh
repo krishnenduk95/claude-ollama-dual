@@ -70,8 +70,6 @@ echo "[$(date '+%H:%M:%S')] PRE-COMPACT triggered for session $SESSION_ID" >> "$
 
 # Optional: run mempalace ingest synchronously so memories land before compaction
 if [ -n "$MEMPAL_DIR" ] && [ -d "$MEMPAL_DIR" ]; then
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    REPO_DIR="$(dirname "$SCRIPT_DIR")"
     mempalace mine "$MEMPAL_DIR" >> "$STATE_DIR/hook.log" 2>&1
 fi
 
