@@ -322,28 +322,26 @@ Everything in one table so you can see exactly which model handles each role, wh
 
 | Role / trigger | Model | Endpoint | When it runs |
 |---|---|---|---|
-| **Main Claude Code session** (orchestrator you talk to) | `claude-opus-4-7` | `api.anthropic.com` via OAuth | Every user turn unless smart-routing downgrades it (see below) |
-| **Smart-routing downgrade** (v1.16.0) | `claude-sonnet-4-6` | `api.anthropic.com` | Opus request with `< 20,000` input chars and no `thinking.enabled` |
-| **Smart-routing downgrade** (v1.16.0) | `claude-haiku-4-5-20251001` | `api.anthropic.com` | Opus request with `< 4,000` input chars and no `thinking.enabled` |
-| `glm-worker` subagent (implementation from plan) | `glm-5.1:cloud` | `localhost:11434/v1/messages` (Ollama → Z.ai cloud) | Opus dispatches the Agent tool with `subagent_type=glm-worker` |
-| `glm-explorer` subagent (code investigation) | `glm-5.1:cloud` | Ollama | `subagent_type=glm-explorer` |
-| `glm-reviewer` subagent (diff / PR review) | `glm-5.1:cloud` | Ollama | `subagent_type=glm-reviewer` |
-| `glm-analyst` subagent (tradeoff analysis) | `glm-5.1:cloud` | Ollama | `subagent_type=glm-analyst` |
-| `glm-architect` subagent (SaaS plans) | `glm-5.1:cloud` | Ollama | `subagent_type=glm-architect` (v1.5 SaaS builder) |
-| `glm-api-designer` subagent | `glm-5.1:cloud` | Ollama | `subagent_type=glm-api-designer` |
-| `glm-ui-builder` subagent | `glm-5.1:cloud` | Ollama | `subagent_type=glm-ui-builder` |
-| `glm-test-generator` subagent | `glm-5.1:cloud` | Ollama | `subagent_type=glm-test-generator` |
-| `glm-security-auditor` subagent | `glm-5.1:cloud` | Ollama | `subagent_type=glm-security-auditor` (auto-escalates findings back to Opus) |
+| **Main Claude Code session** (orchestrator you talk to) | `claude-opus-4-7` | `api.anthropic.com` via OAuth | Every user turn — Opus is the orchestrator and final reviewer |
+| `glm-worker` subagent (implementation from plan) | `deepseek-v4-flash:cloud` | `localhost:11434/v1/messages` (Ollama → cloud) | `subagent_type=glm-worker` — flash's coding scores (LiveCodeBench 91.6) + 30s latency suit mechanical execution |
+| `glm-reviewer` subagent (diff / PR review) | `deepseek-v4-flash:cloud` | Ollama | `subagent_type=glm-reviewer` — fast code understanding for routine review |
+| `glm-api-designer` subagent | `deepseek-v4-flash:cloud` | Ollama | `subagent_type=glm-api-designer` — strict structured-code generation |
+| `glm-explorer` subagent (code investigation) | `kimi-k2.5:cloud` | Ollama | `subagent_type=glm-explorer` — fastest model on the rack (~22s) for read-only retrieval |
+| `glm-ui-builder` subagent | `kimi-k2.5:cloud` | Ollama | `subagent_type=glm-ui-builder` — visual-to-code is kimi's specialty |
+| `glm-test-generator` subagent | `qwen3-coder-next:cloud` | Ollama | `subagent_type=glm-test-generator` — coding-specialist breadth across edge cases |
+| `glm-architect` subagent (SaaS plans) | `glm-5.1:cloud` | Ollama | `subagent_type=glm-architect` — long-horizon planning, GLM 5.1's 8-hour autonomous task strength |
+| `glm-analyst` subagent (tradeoff analysis) | `glm-5.1:cloud` | Ollama | `subagent_type=glm-analyst` — deep reasoning, SWE-Bench Pro #1 OSS |
+| `glm-security-auditor` subagent | `glm-5.1:cloud` | Ollama | `subagent_type=glm-security-auditor` — CyberGym 68.7 adversarial; depth > speed for audits |
 
-> **Every `glm-*` subagent runs on `glm-5.1:cloud` by default** — the prefix reflects the model. Other Ollama-hosted cloud models (`deepseek-v3.2:cloud`, `kimi-k2.5:cloud`, `qwen3-coder-next:cloud`, `cogito-2.1:671b-cloud`) are supported by the proxy and can be opted into per-agent via frontmatter `model:`, but are not wired in by default. The proxy's per-model `max_tokens` clamp (v1.18.0) protects them from Claude Code's default 128k request.
+> **Subagents are routed to specialized cloud models by role.** The 6 fast/coding-heavy subagents use `deepseek-v4-flash`, `kimi-k2.5`, or `qwen3-coder-next`. The 3 deepest-reasoning roles (architect, analyst, security-auditor) stay on `glm-5.1:cloud`. A SessionStart hook (`validate-subagent-models.sh`) verifies this routing on every session start and warns loudly if any subagent's frontmatter has drifted from the canonical mapping. The proxy's per-model `max_tokens` clamp (v1.18.0) keeps each model within its output ceiling.
 
 **Routing rules the proxy applies automatically:**
 
-1. **Pass-through by model name.** Anything matching `^claude-` goes to `api.anthropic.com` with your OAuth Bearer token forwarded untouched. Anything matching `^(glm-\|gemma\|qwen\|llama\|mistral\|phi\|deepseek)` or containing `:` goes to Ollama.
-2. **GLM rigor injection** (see above).
-3. **Smart routing** downgrades tiny Opus requests to Sonnet or Haiku — never upgrades. Thinking-enabled requests are never downgraded.
-4. **Context compression** (v1.15.0) dedupes old Read tool results and stubs stale large tool outputs before forwarding to Anthropic — reduces input tokens without touching recent turns.
-5. **Prompt cache breakpoints** (v1.17.x) are injected on stable prefixes (system prompt, tool defs, a mid-history message, a tail message), capped at 4 total across the whole request, with TTLs that preserve Anthropic's global `1h before 5m` ordering rule.
+1. **Pass-through by model name.** Anything matching `^claude-` goes to `api.anthropic.com` with your OAuth Bearer token forwarded untouched. Anything matching `^(glm-\|gemma\|qwen\|llama\|mistral\|phi\|deepseek\|kimi\|cogito)` or containing `:` goes to Ollama.
+2. **GLM rigor injection** (extended thinking, temperature, max_tokens floor + per-model ceiling clamp — see above).
+3. **Context compression** (v1.15.0) dedupes old Read tool results and stubs stale large tool outputs before forwarding to Anthropic — reduces input tokens without touching recent turns.
+4. **Prompt cache breakpoints** (v1.17.x) are injected on stable prefixes (system prompt, tool defs, a mid-history message, a tail message), capped at 4 total across the whole request, with TTLs that preserve Anthropic's global `1h before 5m` ordering rule. The injector counts existing breakpoints from the upstream client first and only fills the remaining budget.
+5. ~~**Smart routing**~~ removed in v1.19.0 — fired 0 times across 30 days of real traffic because Claude Code defaults `thinking=enabled`. The dead path is gone.
 
 **What you see on your side:** one `claude-dual` command. You never pick the model. Opus decides what to dispatch, the proxy decides what to rewrite.
 
