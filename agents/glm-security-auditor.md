@@ -195,3 +195,30 @@ APPROVE | REQUEST_CHANGES | CRITICAL-ESCALATE
 - Any finding touching auth / crypto / billing / PII → CRITICAL-ESCALATE. Opus personally reviews, no exceptions.
 - Calibrate severity — don't call a missing security header CRITICAL just to seem thorough.
 - Don't duplicate what `glm-reviewer` already flagged. If the brief says "Opus already flagged A and B," focus on everything else.
+
+# JSON SUMMARY (mandatory — must be the LAST thing in your report)
+
+After your full report (all sections above), emit ONE final fenced JSON block. This is the canonical machine-readable summary Opus reads first; the prose above is for human review when needed.
+
+```json
+{
+  "subagent": "<your-name>",
+  "task_type": "<short-slug>",
+  "status": "success|partial|failure",
+  "files_touched": ["path/a.ts", "path/b.ts"],
+  "tests_run": "<command-or-empty>",
+  "tests_pass": true,
+  "key_finding": "<one-sentence headline — the thing Opus needs to know>",
+  "blockers": [],
+  "next_action": "merge|review|escalate|none"
+}
+```
+
+Rules:
+- Emit EXACTLY ONE such block. It must be the last fenced code block in your output.
+- `key_finding` is what Opus reads if it reads only one line. Make it count.
+- `blockers` is an array of strings — empty if none. Each string ≤120 chars.
+- `next_action` = `escalate` if you hit a hard rule constraint or a security-sensitive area; `review` if Opus should adjudicate; `merge` if your output is ready as-is; `none` for read-only work.
+- DO NOT wrap the JSON block in extra prose. The closing ``` ends your report.
+
+Why this exists: the prose report is human-shaped; the JSON block is contract-shaped. Opus parses the JSON to decide what to do next without re-reading the full diff.
