@@ -30,20 +30,29 @@ archive_date=$(date -u +%Y-%m-%d)
 archive_name="audit-${archive_date}.jsonl"
 archive_path="${ARCHIVE_DIR}/${archive_name}"
 
-# If today's archive already exists, we already rotated today — append.
-if [ -e "$archive_path" ]; then
-  cat "$AUDIT_FILE" >> "$archive_path"
-else
-  mv "$AUDIT_FILE" "$archive_path"
-fi
-# Recreate the live file so the proxy keeps appending without restart
-# (the proxy holds a write stream — we touch a fresh file in place).
+# IMPORTANT: the proxy holds an open write fd on AUDIT_FILE. POSIX
+# semantics: an open fd points at the *inode*, not the directory entry.
+# That means `mv $AUDIT_FILE $archive_path` would move the inode the
+# proxy is writing to into the archive — every subsequent write would
+# corrupt the archive instead of going to the new live file.
+#
+# Correct pattern: APPEND to the archive, then TRUNCATE the live file
+# in place. Truncation keeps the inode (and the proxy's fd) valid; the
+# fd simply sees the file shrink to zero. Subsequent proxy writes land
+# at offset 0 of the same inode — i.e. the new live file.
+#
+# Idempotency: running twice in a day means the second batch concatenates
+# onto the existing archive rather than creating audit-DATE-2.jsonl
+# proliferation.
+cat "$AUDIT_FILE" >> "$archive_path"
 : >"$AUDIT_FILE"
 chmod 600 "$AUDIT_FILE" 2>/dev/null || true
 
-# Compute SHA-256 checksum sidecar for the rotated file. This lets us
-# detect tampering or storage corruption later — not crypto-strength
-# integrity (no signing), just a tripwire.
+# Compute SHA-256 checksum sidecar for the rotated file. ALWAYS rewrite
+# it — both on the initial rotation and on any subsequent same-day
+# appends — so the sidecar always matches the current archive bytes.
+# Without this re-computation, a same-day re-rotation invalidates the
+# previous checksum (the file grew, the checksum didn't update).
 checksum=$(shasum -a 256 "$archive_path" | awk '{print $1}')
 echo "$checksum  $archive_name" >"${archive_path}.sha256"
 
@@ -65,11 +74,5 @@ done
 # Retention: delete archives older than RETENTION_DAYS days.
 find "$ARCHIVE_DIR" -name 'audit-*.jsonl*' -type f -mtime +"$RETENTION_DAYS" -delete 2>/dev/null || true
 find "$ARCHIVE_DIR" -name 'audit-*.sha256'  -type f -mtime +"$RETENTION_DAYS" -delete 2>/dev/null || true
-
-# IMPORTANT: the running proxy holds a write fd to the original inode.
-# Truncating the file via `: >` keeps the same inode, so the fd remains
-# valid and writes go to the (now empty) file. No proxy restart needed.
-# Verified by experiment: stat -f %i AUDIT_FILE before/after rotation
-# matches.
 
 echo "rotated $size bytes into ${archive_name}, checksum recorded"
