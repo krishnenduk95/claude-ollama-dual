@@ -18,9 +18,6 @@ const CFG = {
   COMPRESS_CONTEXT: true,
   COMPRESS_KEEP_RECENT_TURNS: 2,
   COMPRESS_MIN_TOOL_RESULT_BYTES: 100,
-  SMART_ROUTING: true,
-  SMART_ROUTING_HAIKU_MAX_INPUT_CHARS: 4000,
-  SMART_ROUTING_SONNET_MAX_INPUT_CHARS: 20000,
   GLM_THINKING_BUDGET: 32000,
   GLM_TEMPERATURE: 0.3,
   GLM_MAX_TOKENS_FLOOR: 8192,
@@ -33,7 +30,6 @@ const _mkCacheControl    = eval(`(${extract('_mkCacheControl')})`);
 const _countExistingBreakpoints = eval(`(${extract('_countExistingBreakpoints')})`);
 const injectPromptCaching = eval(`(${extract('injectPromptCaching')})`);
 const compressContext    = eval(`(${extract('compressContext')})`);
-const smartRoute         = eval(`(${extract('smartRoute')})`);
 // v1.18.0: applyGlmRigor depends on MODEL_MAX_OUTPUT,
 // SAFE_MAX_OUTPUT_FALLBACK, and _ceilingFor. Extract the module-level
 // constants by eval'ing the source lines directly; eval'ing a `function`
@@ -113,42 +109,8 @@ t('dedupes repeated Reads of same file (older stubbed, newer kept when below siz
     `newer Read should be preserved; got ${JSON.stringify(second)}`);
 });
 
-console.log('\nv1.16 smartRoute:');
-t('downgrades tiny opus request to haiku', () => {
-  const { model, downgradedFrom } = smartRoute({ messages: [{ role: 'user', content: 'hi' }] }, 'claude-opus-4-7');
-  eq(model, 'claude-haiku-4-5-20251001');
-  eq(downgradedFrom, 'claude-opus-4-7');
-});
-
-t('downgrades medium opus request to sonnet', () => {
-  const big = 'a'.repeat(5000);
-  const { model, downgradedFrom } = smartRoute({ messages: [{ role: 'user', content: big }] }, 'claude-opus-4-7');
-  eq(model, 'claude-sonnet-4-6');
-  eq(downgradedFrom, 'claude-opus-4-7');
-});
-
-t('preserves opus for large input', () => {
-  const big = 'a'.repeat(25000);
-  const { model, downgradedFrom } = smartRoute({ messages: [{ role: 'user', content: big }] }, 'claude-opus-4-7');
-  eq(model, 'claude-opus-4-7');
-  eq(downgradedFrom, null);
-});
-
-t('respects explicit thinking=enabled', () => {
-  const { model, downgradedFrom } = smartRoute(
-    { thinking: { type: 'enabled' }, messages: [{ role: 'user', content: 'hi' }] },
-    'claude-opus-4-7'
-  );
-  eq(model, 'claude-opus-4-7');
-  eq(downgradedFrom, null);
-});
-
-t('leaves haiku/sonnet alone', () => {
-  const r1 = smartRoute({ messages: [{ role: 'user', content: 'hi' }] }, 'claude-haiku-4-5-20251001');
-  eq(r1.downgradedFrom, null);
-  const r2 = smartRoute({ messages: [{ role: 'user', content: 'hi' }] }, 'claude-sonnet-4-6');
-  eq(r2.downgradedFrom, null);
-});
+// v1.19.0: smartRoute removed — fired 0 times in 30d of real traffic
+// because Claude Code defaults thinking=enabled. Tests deleted with it.
 
 console.log('\nv1.17 injectPromptCaching:');
 t('marks system string with cache_control', () => {

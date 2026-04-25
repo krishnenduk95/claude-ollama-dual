@@ -88,10 +88,6 @@ const CFG = {
   COMPRESS_CONTEXT: process.env.COMPRESS_CONTEXT !== '0',
   COMPRESS_KEEP_RECENT_TURNS: parseInt(process.env.COMPRESS_KEEP_RECENT_TURNS || '10', 10),
   COMPRESS_MIN_TOOL_RESULT_BYTES: parseInt(process.env.COMPRESS_MIN_TOOL_RESULT_BYTES || '2000', 10),
-  // v1.16.0 smart model routing — set to '0' to disable
-  SMART_ROUTING: process.env.SMART_ROUTING !== '0',
-  SMART_ROUTING_HAIKU_MAX_INPUT_CHARS: parseInt(process.env.SMART_ROUTING_HAIKU_MAX_INPUT_CHARS || '4000', 10),
-  SMART_ROUTING_SONNET_MAX_INPUT_CHARS: parseInt(process.env.SMART_ROUTING_SONNET_MAX_INPUT_CHARS || '20000', 10),
 };
 
 // ── Logger ───────────────────────────────────────────────────────────────
@@ -497,8 +493,11 @@ function compressContext(parsed) {
 // works on day one. Clamping only reduces; we never raise max_tokens above
 // the caller's value.
 const MODEL_MAX_OUTPUT = {
-  // Verified: deepseek-v3.2:cloud rejects >65536 (reported today).
+  // Verified: deepseek-v3.2:cloud rejects >65536.
   'deepseek-v3.2:cloud': 65536,
+  // Verified: deepseek-v4-flash rejects >65536 (ref 1d465ce0, e30e7259).
+  'deepseek-v4-flash': 65536,
+  'deepseek-v4-flash:cloud': 65536,
   // Conservative defaults for other Ollama cloud models. Update as verified.
   'glm-5.1:cloud': 98304,
   'kimi-k2.5:cloud': 131072,
@@ -538,47 +537,13 @@ function applyGlmRigor(parsed) {
   return parsed;
 }
 
-// ── v1.16.0: Smart model routing ─────────────────────────────────────────
-// Downgrades trivially-small Anthropic requests to cheaper tiers.
-// Guards:
-//   - only rewrites opus-class requests (haiku/sonnet left alone)
-//   - honors thinking=enabled (user explicitly wants reasoning)
-// Returns { model: newModel, downgradedFrom: origModel|null }.
-function smartRoute(parsed, origModel) {
-  if (!CFG.SMART_ROUTING) return { model: origModel, downgradedFrom: null };
-  if (!/opus/i.test(origModel)) return { model: origModel, downgradedFrom: null };
-  if (parsed.thinking && parsed.thinking.type === 'enabled') {
-    return { model: origModel, downgradedFrom: null };
-  }
-  let inputChars = 0;
-  if (typeof parsed.system === 'string') inputChars += parsed.system.length;
-  else if (Array.isArray(parsed.system)) {
-    for (const s of parsed.system) {
-      if (s && typeof s.text === 'string') inputChars += s.text.length;
-    }
-  }
-  if (Array.isArray(parsed.messages)) {
-    for (const m of parsed.messages) {
-      if (!m || !m.content) continue;
-      if (typeof m.content === 'string') inputChars += m.content.length;
-      else if (Array.isArray(m.content)) {
-        for (const block of m.content) {
-          if (!block) continue;
-          if (typeof block.text === 'string') inputChars += block.text.length;
-          else if (typeof block.content === 'string') inputChars += block.content.length;
-          else if (block.input) inputChars += JSON.stringify(block.input).length;
-        }
-      }
-    }
-  }
-  if (inputChars < CFG.SMART_ROUTING_HAIKU_MAX_INPUT_CHARS) {
-    return { model: 'claude-haiku-4-5-20251001', downgradedFrom: origModel };
-  }
-  if (inputChars < CFG.SMART_ROUTING_SONNET_MAX_INPUT_CHARS) {
-    return { model: 'claude-sonnet-4-6', downgradedFrom: origModel };
-  }
-  return { model: origModel, downgradedFrom: null };
-}
+// v1.19.0: smart-routing removed.
+// Rationale: across 30 days and ~5,500 Opus requests, the downgrade
+// path fired 0 times in real traffic — Claude Code defaults to
+// thinking=enabled, which the guard correctly bypassed. The feature was
+// dead code in the hot path of every Anthropic request and contributed
+// to two of the four proxy bugs shipped this week. Removing it
+// simplifies the proxy without changing user-visible behavior.
 
 // ── Routing classifier ───────────────────────────────────────────────────
 function classifyModel(rawModel) {
@@ -748,7 +713,6 @@ async function handle(req, res) {
   }
 
   let compressBytes = 0;
-  let routingFrom = null;
   let routedModel = model;
   let cacheBreakpoints = 0;
   if (provider === 'ollama') {
@@ -757,9 +721,7 @@ async function handle(req, res) {
     const c = compressContext(parsed);
     parsed = c.parsed;
     compressBytes = c.bytesSaved;
-    const r = smartRoute(parsed, model);
-    routedModel = r.model;
-    routingFrom = r.downgradedFrom;
+    // v1.19.0: smart-routing removed — see comment near classifyModel().
     const ic = injectPromptCaching(parsed);
     parsed = ic.parsed;
     cacheBreakpoints = ic.breakpoints;
@@ -793,13 +755,11 @@ async function handle(req, res) {
   reqLogger.info({
     event: 'request_start', provider, model: routedModel, path: req.url,
     user_agent: req.headers['user-agent'] || '',
-    ...(routingFrom ? { routed_from: routingFrom } : {}),
     ...(compressBytes ? { compressed_bytes: compressBytes } : {}),
     ...(cacheBreakpoints ? { cache_breakpoints: cacheBreakpoints } : {}),
   });
   auditLog({
     event: 'request', request_id: requestId, provider, model: routedModel, path: req.url,
-    ...(routingFrom ? { routed_from: routingFrom } : {}),
     ...(compressBytes ? { compressed_bytes: compressBytes } : {}),
     ...(cacheBreakpoints ? { cache_breakpoints: cacheBreakpoints } : {}),
   });
@@ -871,7 +831,6 @@ async function handle(req, res) {
         event: 'request_end', provider, model: routedModel, status: pRes.statusCode,
         duration_sec: durSec, input_tokens: sseTok.input, output_tokens: sseTok.output,
         cache_creation_tokens: sseTok.cacheCreate, cache_read_tokens: sseTok.cacheRead,
-        ...(routingFrom ? { routed_from: routingFrom } : {}),
         ...(compressBytes ? { compressed_bytes: compressBytes } : {}),
         ...(cacheBreakpoints ? { cache_breakpoints: cacheBreakpoints } : {}),
       });
@@ -880,7 +839,6 @@ async function handle(req, res) {
         status: pRes.statusCode, duration_sec: durSec,
         input_tokens: sseTok.input, output_tokens: sseTok.output,
         cache_creation_tokens: sseTok.cacheCreate, cache_read_tokens: sseTok.cacheRead,
-        ...(routingFrom ? { routed_from: routingFrom } : {}),
         ...(compressBytes ? { compressed_bytes: compressBytes } : {}),
         ...(cacheBreakpoints ? { cache_breakpoints: cacheBreakpoints } : {}),
       });
@@ -897,7 +855,6 @@ async function handle(req, res) {
           event: 'request_end', provider, model: routedModel, status: pRes.statusCode,
           duration_sec: durSec, input_tokens: inputTok, output_tokens: outputTok,
           cache_creation_tokens: cacheCreate, cache_read_tokens: cacheRead,
-          ...(routingFrom ? { routed_from: routingFrom } : {}),
           ...(compressBytes ? { compressed_bytes: compressBytes } : {}),
           ...(cacheBreakpoints ? { cache_breakpoints: cacheBreakpoints } : {}),
         });
@@ -906,7 +863,6 @@ async function handle(req, res) {
           status: pRes.statusCode, duration_sec: durSec,
           input_tokens: inputTok, output_tokens: outputTok,
           cache_creation_tokens: cacheCreate, cache_read_tokens: cacheRead,
-          ...(routingFrom ? { routed_from: routingFrom } : {}),
           ...(compressBytes ? { compressed_bytes: compressBytes } : {}),
           ...(cacheBreakpoints ? { cache_breakpoints: cacheBreakpoints } : {}),
         });
