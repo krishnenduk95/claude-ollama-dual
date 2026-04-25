@@ -46,19 +46,31 @@ test('classifyModel: unknown model with colon → ollama (has tag)', () => {
 });
 
 // ── applyGlmRigor ────────────────────────────────────────────────────────
-test('applyGlmRigor: adds thinking budget when absent', () => {
-  const p = applyGlmRigor({});
+// v1.18.0: applyGlmRigor also clamps max_tokens to per-model ceiling and
+// shrinks thinking.budget_tokens if it exceeds max_tokens. Tests that
+// verify the 32000 default need a max_tokens large enough not to trigger
+// the shrink.
+test('applyGlmRigor: adds thinking budget when absent (with adequate max_tokens)', () => {
+  const p = applyGlmRigor({ max_tokens: 64000 });
   assert.deepEqual(p.thinking, { type: 'enabled', budget_tokens: 32000 });
 });
 
 test('applyGlmRigor: fills budget_tokens when thinking.enabled without budget', () => {
-  const p = applyGlmRigor({ thinking: { type: 'enabled' } });
+  const p = applyGlmRigor({ max_tokens: 64000, thinking: { type: 'enabled' } });
   assert.equal(p.thinking.budget_tokens, 32000);
 });
 
-test('applyGlmRigor: preserves caller-provided thinking budget', () => {
-  const p = applyGlmRigor({ thinking: { type: 'enabled', budget_tokens: 8000 } });
+test('applyGlmRigor: preserves caller-provided thinking budget when it fits', () => {
+  const p = applyGlmRigor({ max_tokens: 64000, thinking: { type: 'enabled', budget_tokens: 8000 } });
   assert.equal(p.thinking.budget_tokens, 8000);
+});
+
+test('applyGlmRigor: shrinks thinking budget when it would exceed max_tokens', () => {
+  // Floor raises max_tokens to 8192; thinking 32000 must shrink to fit.
+  const p = applyGlmRigor({});
+  assert.equal(p.max_tokens, 8192);
+  assert.ok(p.thinking.budget_tokens < p.max_tokens, 'thinking < max_tokens');
+  assert.ok(p.thinking.budget_tokens >= 1024, 'thinking ≥ 1024 floor');
 });
 
 test('applyGlmRigor: sets default temperature when absent', () => {
@@ -73,10 +85,14 @@ test('applyGlmRigor: preserves caller-provided temperature (caller wins)', () =>
   assert.equal(p2.temperature, 0);
 });
 
-test('applyGlmRigor: floors max_tokens at 8192 when smaller / missing', () => {
+test('applyGlmRigor: floors max_tokens at 8192 and clamps to per-model ceiling', () => {
+  // Floor: anything below 8192 gets raised.
   assert.equal(applyGlmRigor({}).max_tokens, 8192);
   assert.equal(applyGlmRigor({ max_tokens: 1000 }).max_tokens, 8192);
-  assert.equal(applyGlmRigor({ max_tokens: 128000 }).max_tokens, 128000);
+  // v1.18.0: ceiling clamp. Unknown model → SAFE_MAX_OUTPUT_FALLBACK (60000).
+  assert.equal(applyGlmRigor({ max_tokens: 128000 }).max_tokens, 60000);
+  // Known model → its specific ceiling (glm-5.1:cloud = 98304).
+  assert.equal(applyGlmRigor({ model: 'glm-5.1:cloud', max_tokens: 128000 }).max_tokens, 98304);
 });
 
 // ── TokenBucket ──────────────────────────────────────────────────────────
