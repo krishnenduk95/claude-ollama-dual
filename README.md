@@ -388,21 +388,32 @@ Everything in one table so you can see exactly which model handles each role, wh
 ┌─────────────────────────────────────────────────────────────┐
 │  Claude Code process                                         │
 │    Main model: Opus 4.7 (Claude Max OAuth)                  │
-│    Subagents: glm-worker / glm-explorer / glm-reviewer /    │
-│               glm-analyst   (frontmatter model=glm-5.1:cloud)│
+│    9 subagents, role-routed to Ollama cloud models:         │
+│      glm-architect / glm-analyst / glm-security-auditor     │
+│         → glm-5.1:cloud         (deep reasoning)            │
+│      glm-worker / glm-reviewer / glm-api-designer           │
+│         → deepseek-v4-flash:cloud (fast structured code)    │
+│      glm-explorer / glm-ui-builder                          │
+│         → kimi-k2.5:cloud        (fastest, retrieval/UI)    │
+│      glm-test-generator                                      │
+│         → qwen3-coder-next:cloud (coding-specialist)        │
 └─────────────────────────────────────────────────────────────┘
                      │
                      ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  Proxy   (~/.claude-dual/proxy.js, port 3456)               │
 │                                                              │
-│   model = claude-*            model = glm-* / *:*           │
-│        │                           │                         │
+│   model = claude-*            model matches:                │
+│        │                       glm-* | deepseek* | kimi*    │
+│        │                       qwen* | gemma* | llama*      │
+│        │                       mistral* | phi* | cogito*    │
+│        │                       OR contains ':'              │
 │        ▼                           ▼                         │
 │   api.anthropic.com          localhost:11434/v1/messages    │
-│   (OAuth Bearer token        (Ollama → GLM 5.1 Cloud;        │
-│    forwarded untouched)       proxy injects thinking=32k,    │
-│                               temp=0.3, max_tokens≥8192)     │
+│   (OAuth Bearer token        (Ollama → cloud model; proxy   │
+│    forwarded untouched)       injects thinking=32k,         │
+│                               temp=0.3, max_tokens floor    │
+│                               8192, per-model ceiling clamp)│
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -425,9 +436,20 @@ Both are MCP-aware: `code-review-graph` exposes graph queries (`get_impact_radiu
 
 ---
 
-## GLM 5.1 vs Opus 4.7 — honest capability notes
+## Worker models — honest capability notes
 
-GLM 5.1 is a strong open-weights model from Z.ai (Mixture-of-Experts, 754B total / 40B active parameters). It's excellent for delegated worker tasks but is **not equivalent** to Opus 4.7 on every dimension. Here's the honest read so you know what to expect:
+The orchestrator is always **Opus 4.7** (Anthropic, OAuth). Subagents route to one of **four** Ollama cloud models depending on role; see the [Which model runs when](#which-model-runs-when) table for the exact mapping. The four worker models are not interchangeable — each is chosen for what it's best at:
+
+| Model | Strength | Roles routed here |
+|---|---|---|
+| `glm-5.1:cloud` | Deep reasoning, 8-hour autonomous tasks, SWE-Bench Pro #1 OSS, CyberGym 68.7 (adversarial) | architect, analyst, security-auditor |
+| `deepseek-v4-flash:cloud` | LiveCodeBench 91.6, fastest structured-code generation (~30s avg) | worker, reviewer, api-designer |
+| `kimi-k2.5:cloud` | Fastest model on the rack (~22s avg), visual-to-code specialty | explorer, ui-builder |
+| `qwen3-coder-next:cloud` | Coding-specialist breadth across edge cases | test-generator |
+
+The most-used worker is **GLM 5.1**, an open-weights MoE from Z.ai (754B total / 40B active). The benchmarks below compare it against Opus 4.7 because it's the one that handles the deepest-reasoning delegated work; the other three workers are biased toward speed/coding and aren't directly comparable on the same axis.
+
+
 
 | Benchmark | GLM 5.1 | Opus 4.6 | Opus 4.7 | Read |
 |---|---:|---:|---:|---|
@@ -447,9 +469,11 @@ GLM 5.1 is a strong open-weights model from Z.ai (Mixture-of-Experts, 754B total
 
 ---
 
-## Typical Opus ↔ GLM split
+## Typical Opus ↔ worker split
 
-| Scenario | Opus | GLM |
+"Worker" below means whichever Ollama-hosted model the dispatched subagent is configured to use (`glm-5.1`, `deepseek-v4-flash`, `kimi-k2.5`, or `qwen3-coder-next` — see [Which model runs when](#which-model-runs-when)). The split is by Opus orchestration time vs. delegated worker time.
+
+| Scenario | Opus | Workers |
 |---|---:|---:|
 | Greenfield feature build | 20% | 80% |
 | Implementing from a plan | 15% | 85% |
@@ -462,7 +486,9 @@ GLM 5.1 is a strong open-weights model from Z.ai (Mixture-of-Experts, 754B total
 | Security / auth / billing work | 95% | 5% |
 | Production incident | 90% | 10% |
 
-**Default expectation for typical SaaS work: ~30% Opus / ~70% GLM by token volume.**
+**Default expectation for typical SaaS work: ~30% Opus / ~70% workers by token volume.**
+
+Caveat from real audit data: by **call count** Opus and workers run nearly 1:1, because every worker dispatch produces a follow-up Opus turn that reads the result back. Token-volume share matches the table above only when subagent reports stay tight (the mandatory JSON SUMMARY block is the intervention there).
 
 ---
 
