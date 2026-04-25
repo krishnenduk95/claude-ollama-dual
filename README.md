@@ -24,6 +24,7 @@
 - [Usage](#usage)
 - [How delegation works](#how-delegation-works)
 - [Architecture](#architecture)
+- [Memory layers](#memory-layers)
 - [Typical Opus ↔ GLM split](#typical-opus--glm-split)
 - [Real-world scenarios](#real-world-scenarios)
 - [Verification & testing](#verification--testing)
@@ -55,7 +56,7 @@ The proxy isn't just a router — it's a hardened HTTP gateway with:
 | **Health + readiness** | `GET /health`, `/livez`, `/readyz` for monitoring tools |
 | **Prometheus metrics** | `GET /metrics` — request counters, duration histograms, circuit state, cost, in-flight gauges |
 | **Cost tracking + alerts** | `GET /cost` with per-model breakdown; warns at 80% and errors at 100% of `COST_DAILY_LIMIT_USD` |
-| **Audit trail** | Every dispatch logged as JSON lines at `~/.claude-dual/audit.jsonl` |
+| **Audit trail** | Every dispatch logged as JSON lines at `~/.claude-dual/audit.jsonl`; daily rotation into `audit-archive/audit-YYYY-MM-DD.jsonl(.gz)` with SHA-256 integrity sidecars and 30-day retention (v1.20.0). The proxy's open write-fd survives rotation (truncation in place keeps the inode), so no restart is required. |
 | **Structured logging** | pino-based JSON logs with per-request IDs for trace correlation |
 | **Retry with backoff** | 3 attempts with exponential backoff + jitter on network errors and 5xx |
 | **Circuit breaker** | Per-provider; opens after 5 failures, half-opens after 30s, auto-closes on success |
@@ -63,7 +64,7 @@ The proxy isn't just a router — it's a hardened HTTP gateway with:
 | **Request size limit** | 10 MB default (`MAX_REQUEST_BYTES`), rejects oversized with 413 |
 | **Optional auth** | Set `PROXY_AUTH_TOKEN` to require Bearer auth; Claude Max OAuth always passes through |
 | **Graceful shutdown** | SIGTERM drains in-flight requests, exits within 30s |
-| **Unit tested** | 27 passing tests via `node:test`, CI on macOS + Ubuntu × Node 18/20/22 |
+| **Unit + integration tested** | **61 tests, 0 failures**: 28 `node:test` (proxy core) + 21 unit (`proxy/test-v15-v17.js`) + 12 integration (`proxy/test-integration.js`). The integration suite is fixture-driven and asserts that real-shaped Anthropic and Ollama payloads pass through `injectPromptCaching` + `applyGlmRigor` and satisfy every published constraint (TTL ordering global, ≤4 cache breakpoints, per-model `max_tokens` ceiling). Added after four production proxy bugs in one week — every bug now has a regression fixture. CI on macOS + Ubuntu × Node 18/20/22. |
 
 All 12+ knobs tunable via env vars. See `proxy/proxy.js` header for full list.
 
@@ -286,6 +287,26 @@ tail -f ~/.claude-dual/proxy.log
 
 Each request line shows the provider, model, and (for GLM) the rigor injection parameters.
 
+### Subagent report contract — mandatory JSON SUMMARY block
+
+Every `glm-*` subagent ends its report with a single fenced JSON block. The prose narrative remains for human review; the JSON is the canonical machine-readable contract Opus parses to decide its next move without re-reading the full diff. Reduces orchestrator token consumption when handing tasks back through multi-step pipelines.
+
+```json
+{
+  "subagent": "glm-worker",
+  "task_type": "implementation",
+  "status": "success",
+  "files_touched": ["proxy/proxy.js", "proxy/test-integration.js"],
+  "tests_run": "node test-integration.js",
+  "tests_pass": true,
+  "key_finding": "B4 regression covered; all 12 fixtures pass.",
+  "blockers": [],
+  "next_action": "merge"
+}
+```
+
+`next_action` ∈ `{merge, review, escalate, none}`. The auto-escalate convention (e.g. `glm-security-auditor` finds an auth-touching issue) sets `escalate` and Opus takes over directly.
+
 ---
 
 ## How delegation works
@@ -384,6 +405,23 @@ Everything in one table so you can see exactly which model handles each role, wh
 │                               temp=0.3, max_tokens≥8192)     │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+---
+
+## Memory layers
+
+Two complementary indexes run automatically on every project. They answer different questions, so we keep both — they don't overlap meaningfully.
+
+| Layer | What it indexes | Question it answers | Auto-trigger |
+|---|---|---|---|
+| **`code-review-graph`** | Code structure: functions, files, modules + typed edges (calls, imports, tests) → SQLite | "If I rename this function, what breaks? Who calls X? What tests cover Y?" | SessionStart hook builds/updates `.code-review-graph/graph.db` for the cwd repo; PostToolUse hook updates it after every `git commit/merge/rebase/cherry-pick` |
+| **`mempalace`** (3.3.3) | Conversation history + project files: verbatim chunks → ChromaDB vector store, hierarchical (wings → rooms → drawers) | "Have I solved this before? What did I write about TTL ordering 3 weeks ago? Why does this exist?" | SessionStart hook runs `mempalace init --yes . && mempalace mine .` in a backgrounded subshell (~28ms blocking, full mine continues async); Stop and PreCompact hooks save the conversation transcript automatically |
+
+Both are MCP-aware: `code-review-graph` exposes graph queries (`get_impact_radius`, `query_graph`), `mempalace` exposes 29 memory tools (`mempalace_search`, `mempalace_recall`, `mempalace_wake_up`). The CLAUDE.md priority is **graph > grep > read** for code questions, and **memory > grep** for "have I done this before."
+
+**Storage**: `.code-review-graph/graph.db` per project (~100KB-10MB), `~/.mempalace/` global (~2-15MB per indexed project). MemPalace files in project root (`mempalace.yaml`, `entities.json`) are auto-added to `.gitignore` post-init.
+
+**Refusal rules** (auto-mine hook): won't index `$HOME` or `/`; lock files prevent concurrent mines for the same project; graceful no-op if the `mempalace` CLI is uninstalled.
 
 ---
 
