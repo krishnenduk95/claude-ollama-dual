@@ -728,6 +728,17 @@ async function handle(req, res) {
   }
   parsed.model = routedModel;
 
+  // v1.21.0: surface thinking budget in audit/logs so we can verify
+  // extended thinking is actually firing per request — both for proxy-
+  // injected (Ollama branch) and pass-through (Anthropic branch) requests.
+  // Records 0 when thinking is explicitly disabled (caller-controlled),
+  // omits when no thinking field is present at all (legacy clients).
+  const thinkingBudget =
+    parsed.thinking && parsed.thinking.type === 'enabled' &&
+    typeof parsed.thinking.budget_tokens === 'number'
+      ? parsed.thinking.budget_tokens
+      : null;
+
   const outBody = Buffer.from(JSON.stringify(parsed));
   const fwdHeaders = { ...req.headers };
   delete fwdHeaders.host;
@@ -757,11 +768,13 @@ async function handle(req, res) {
     user_agent: req.headers['user-agent'] || '',
     ...(compressBytes ? { compressed_bytes: compressBytes } : {}),
     ...(cacheBreakpoints ? { cache_breakpoints: cacheBreakpoints } : {}),
+    ...(thinkingBudget !== null ? { thinking_budget: thinkingBudget } : {}),
   });
   auditLog({
     event: 'request', request_id: requestId, provider, model: routedModel, path: req.url,
     ...(compressBytes ? { compressed_bytes: compressBytes } : {}),
     ...(cacheBreakpoints ? { cache_breakpoints: cacheBreakpoints } : {}),
+    ...(thinkingBudget !== null ? { thinking_budget: thinkingBudget } : {}),
   });
 
   inflight++;
@@ -833,6 +846,7 @@ async function handle(req, res) {
         cache_creation_tokens: sseTok.cacheCreate, cache_read_tokens: sseTok.cacheRead,
         ...(compressBytes ? { compressed_bytes: compressBytes } : {}),
         ...(cacheBreakpoints ? { cache_breakpoints: cacheBreakpoints } : {}),
+        ...(thinkingBudget !== null ? { thinking_budget: thinkingBudget } : {}),
       });
       auditLog({
         event: 'request_end', request_id: requestId, provider, model: routedModel,
@@ -841,6 +855,7 @@ async function handle(req, res) {
         cache_creation_tokens: sseTok.cacheCreate, cache_read_tokens: sseTok.cacheRead,
         ...(compressBytes ? { compressed_bytes: compressBytes } : {}),
         ...(cacheBreakpoints ? { cache_breakpoints: cacheBreakpoints } : {}),
+        ...(thinkingBudget !== null ? { thinking_budget: thinkingBudget } : {}),
       });
     } else if (isJson && captured.length) {
       try {
@@ -857,6 +872,7 @@ async function handle(req, res) {
           cache_creation_tokens: cacheCreate, cache_read_tokens: cacheRead,
           ...(compressBytes ? { compressed_bytes: compressBytes } : {}),
           ...(cacheBreakpoints ? { cache_breakpoints: cacheBreakpoints } : {}),
+          ...(thinkingBudget !== null ? { thinking_budget: thinkingBudget } : {}),
         });
         auditLog({
           event: 'request_end', request_id: requestId, provider, model: routedModel,
@@ -865,6 +881,7 @@ async function handle(req, res) {
           cache_creation_tokens: cacheCreate, cache_read_tokens: cacheRead,
           ...(compressBytes ? { compressed_bytes: compressBytes } : {}),
           ...(cacheBreakpoints ? { cache_breakpoints: cacheBreakpoints } : {}),
+          ...(thinkingBudget !== null ? { thinking_budget: thinkingBudget } : {}),
         });
       } catch {
         reqLogger.info({ event: 'request_end', provider, model: routedModel, status: pRes.statusCode, duration_sec: durSec });
