@@ -10,6 +10,19 @@
 
 set -eu
 
+CACHE_DIR="${HOME}/.claude-dual/cache"
+mkdir -p "$CACHE_DIR"
+CACHE_FILE="$CACHE_DIR/validate-subagent-models.last"
+
+# Skip if cache exists and is newer than ALL agent files
+if [ -f "$CACHE_FILE" ]; then
+  newest_agent=""
+  newest_agent=$(ls -t "${HOME}/.claude/agents/glm-"*.md 2>/dev/null | head -1) || true
+  if [ -z "$newest_agent" ] || [ "$CACHE_FILE" -nt "$newest_agent" ]; then
+    exit 0
+  fi
+fi
+
 AGENTS_DIR="${HOME}/.claude/agents"
 [ -d "$AGENTS_DIR" ] || exit 0
 
@@ -87,3 +100,6 @@ if drifts or missing:
         }
     }))
 PY
+
+# Update cache since validation passed
+touch "$CACHE_FILE"

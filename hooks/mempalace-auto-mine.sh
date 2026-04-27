@@ -19,6 +19,11 @@
 
 set -eu
 
+# Only mine projects that have a MemPalace store
+if [ ! -d ".mempalace" ] && [ ! -d "$HOME/.mempalace" ]; then
+  exit 0
+fi
+
 MEMPALACE_BIN="$HOME/Library/Python/3.9/bin/mempalace"
 LOG_FILE="$HOME/.claude-dual/mempalace-auto-mine.log"
 LOCK_DIR="$HOME/.claude-dual/mempalace-locks"

@@ -135,8 +135,21 @@ if (promClient) {
       name: 'claude_dual_inflight_requests', help: 'In-flight requests',
       registers: [register],
     }),
+    modelDegraded: new promClient.Gauge({
+      name: 'claude_dual_model_degraded',
+      help: 'Model degraded state (1=degraded, 0=healthy)',
+      labelNames: ['model'], registers: [register],
+    }),
+    modelFailureCount: new promClient.Gauge({
+      name: 'claude_dual_model_failure_count',
+      help: 'Model failure count in last 60s',
+      labelNames: ['model'], registers: [register],
+    }),
   };
 }
+
+// ── Ollama outage state (for B3 observability: /health + audit events) ──
+const ollamaOutageState = { active: false, since: null };
 
 // ── Rate limiter (token bucket per provider) ─────────────────────────────
 class TokenBucket {
@@ -168,6 +181,7 @@ class CircuitBreaker {
     this.resetMs = resetMs;
     this.lastFailure = 0;
     this.name = name;
+    this._outageIntervalId = null;
   }
   canAttempt() {
     if (this.state === 'closed') return true;
@@ -182,6 +196,9 @@ class CircuitBreaker {
     if (this.state !== 'closed') logger.info({ event: 'circuit_close', provider: this.name });
     this.failures = 0;
     this.state = 'closed';
+    if (this.name === 'ollama') {
+      this._clearOutage();
+    }
     this._updateMetric();
   }
   recordFailure() {
@@ -190,8 +207,31 @@ class CircuitBreaker {
     if (this.failures >= this.threshold && this.state !== 'open') {
       this.state = 'open';
       logger.warn({ event: 'circuit_open', provider: this.name, failures: this.failures });
+      if (this.name === 'ollama') {
+        this._startOutage();
+      }
     }
     this._updateMetric();
+  }
+  _startOutage() {
+    if (ollamaOutageState.active) return; // already in outage — don't duplicate
+    ollamaOutageState.active = true;
+    ollamaOutageState.since = new Date().toISOString();
+    auditLog({ event: 'ollama_outage_start' });
+    if (this._outageIntervalId) clearInterval(this._outageIntervalId);
+    this._outageIntervalId = setInterval(() => {
+      auditLog({ event: 'ollama_outage_active' });
+    }, 5 * 60 * 1000);
+    this._outageIntervalId.unref();
+  }
+  _clearOutage() {
+    if (!ollamaOutageState.active) return; // no active outage
+    if (this._outageIntervalId) {
+      clearInterval(this._outageIntervalId);
+      this._outageIntervalId = null;
+    }
+    ollamaOutageState.active = false;
+    auditLog({ event: 'ollama_outage_end' });
   }
   _updateMetric() {
     if (metrics) metrics.circuitState.set({ provider: this.name }, { closed: 0, open: 1, 'half-open': 2 }[this.state]);
@@ -201,6 +241,97 @@ const breakers = {
   anthropic: new CircuitBreaker(CFG.CIRCUIT_THRESHOLD, CFG.CIRCUIT_RESET_MS, 'anthropic'),
   ollama: new CircuitBreaker(CFG.CIRCUIT_THRESHOLD, CFG.CIRCUIT_RESET_MS, 'ollama'),
 };
+
+// ── Per-model circuit breaker tracking (DEGRADED state, informational only) ─
+const modelStates = new Map(); // modelId -> {failures: [], degradedUntil: 0}
+
+function _recordModelSuccess(modelId) {
+  let state = modelStates.get(modelId);
+  if (!state) {
+    state = { failures: [], degradedUntil: 0 };
+    modelStates.set(modelId, state);
+  }
+  state.failures = [];
+}
+
+function _recordModelFailure(modelId) {
+  let state = modelStates.get(modelId);
+  if (!state) {
+    state = { failures: [], degradedUntil: 0 };
+    modelStates.set(modelId, state);
+  }
+  state.failures.push(Date.now());
+  // Prune to last 60s
+  const cutoff = Date.now() - 60000;
+  state.failures = state.failures.filter(function(t) { return t > cutoff; });
+  if (state.failures.length >= 3) {
+    state.degradedUntil = Date.now() + 5 * 60 * 1000;
+    auditLog({ event: 'model_degraded', model: modelId, until: new Date(state.degradedUntil).toISOString(), failures: 3 });
+  }
+}
+
+function _checkModelDegraded(modelId) {
+  const state = modelStates.get(modelId);
+  if (!state) return false;
+  return state.degradedUntil > Date.now();
+}
+
+// v1.22.0: brief_template versioning (B2). Scans the last user message
+// for an HTML comment marker: <!-- brief_template: <version> -->
+// Returns the version string or null.
+function _extractBriefTemplate(parsed) {
+  if (!parsed || !Array.isArray(parsed.messages) || parsed.messages.length === 0) return null;
+  const re = /<!--\s*brief_template:\s*([^\s<]+)\s*-->/;
+  // Walk messages backwards to find the last user message
+  for (let i = parsed.messages.length - 1; i >= 0; i--) {
+    const msg = parsed.messages[i];
+    if (!msg || msg.role !== 'user') continue;
+    const content = msg.content;
+    if (typeof content === 'string') {
+      const m = content.match(re);
+      if (m) return m[1];
+    } else if (Array.isArray(content)) {
+      for (const block of content) {
+        if (block && typeof block === 'object' && block.type === 'text' && typeof block.text === 'string') {
+          const m = block.text.match(re);
+          if (m) return m[1];
+        }
+      }
+    }
+  }
+  return null;
+}
+
+function _updateModelMetrics() {
+  if (!metrics) return;
+  // Seed known models with 0 so /metrics always shows the gauge (prom-client
+  // hides gauges that never had .set() called).
+  const knownModels = [
+    'claude-opus-4-7', 'claude-haiku-4-5-20251001',
+    'glm-5.1:cloud', 'deepseek-v4-flash:cloud',
+    'kimi-k2.5:cloud', 'qwen3-coder-next:cloud',
+  ];
+  knownModels.forEach(function(m) {
+    if (!modelStates.has(m)) {
+      metrics.modelDegraded.set({ model: m }, 0);
+      metrics.modelFailureCount.set({ model: m }, 0);
+    }
+  });
+  modelStates.forEach(function(state, modelId) {
+    metrics.modelDegraded.set({ model: modelId }, state.degradedUntil > Date.now() ? 1 : 0);
+    metrics.modelFailureCount.set({ model: modelId }, state.failures.length);
+  });
+}
+
+function _generateModelMetricsLines() {
+  const lines = [];
+  modelStates.forEach(function(state, modelId) {
+    const degraded = state.degradedUntil > Date.now() ? 1 : 0;
+    lines.push('claude_dual_model_degraded{model="' + modelId + '"} ' + degraded);
+    lines.push('claude_dual_model_failure_count{model="' + modelId + '"} ' + state.failures.length);
+  });
+  return lines;
+}
 
 // ── Cost tracking (rough, based on published pricing) ────────────────────
 const PRICING = {
@@ -396,9 +527,21 @@ function injectPromptCaching(parsed) {
         m.content = [{ type: 'text', text: m.content, cache_control: _mkCacheControl(globalTtl) }];
         added++; budget--;
       } else if (Array.isArray(m.content) && m.content.length > 0) {
-        const last = m.content[m.content.length - 1];
-        if (last && typeof last === 'object' && !last.cache_control) {
-          last.cache_control = _mkCacheControl(globalTtl);
+        // v1.21.1: Never attach cache_control to `thinking` or
+        // `redacted_thinking` blocks — Anthropic signs those blocks and any
+        // mutation invalidates the signature, producing:
+        //   400 messages.N.content.0: Invalid `signature` in `thinking` block
+        // Walk backward to the last block that is safe to cache.
+        let target = null;
+        for (let k = m.content.length - 1; k >= 0; k--) {
+          const b = m.content[k];
+          if (!b || typeof b !== 'object') continue;
+          if (b.type === 'thinking' || b.type === 'redacted_thinking') continue;
+          target = b;
+          break;
+        }
+        if (target && !target.cache_control) {
+          target.cache_control = _mkCacheControl(globalTtl);
           added++; budget--;
         }
       }
@@ -577,7 +720,7 @@ function handleInternalEndpoint(req, res) {
   if (req.method !== 'GET') return false;
   const url = req.url.split('?')[0];
   if (url === '/health' || url === '/livez') {
-    send(res, 200, { status: 'ok', uptime_sec: Math.floor(process.uptime()) });
+    send(res, 200, { status: 'ok', uptime_sec: Math.floor(process.uptime()), ollama_outage: { active: ollamaOutageState.active, since: ollamaOutageState.since } });
     return true;
   }
   if (url === '/readyz') {
@@ -589,14 +732,23 @@ function handleInternalEndpoint(req, res) {
     return true;
   }
   if (url === '/metrics') {
-    if (!metrics) { send(res, 503, { error: 'prom-client not installed' }); return true; }
-    metrics.register.metrics().then(data => {
+    // /metrics MUST be auth'd if token is set (k8s probes on /health are ok)
+    if (CFG.PROXY_AUTH_TOKEN && !checkAuth(req)) { send(res, 401, { error: 'unauthorized' }); return true; }
+    if (!metrics) {
+      const lines = _generateModelMetricsLines();
+      res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('# claude-dual proxy model metrics (prom-client not installed)\n' + lines.join('\n'));
+      return true;
+    }
+    _updateModelMetrics();
+    metrics.register.metrics().then(function(data) {
       res.writeHead(200, { 'Content-Type': metrics.register.contentType });
       res.end(data);
     });
     return true;
   }
   if (url === '/cost') {
+    if (CFG.PROXY_AUTH_TOKEN && !checkAuth(req)) { send(res, 401, { error: 'unauthorized' }); return true; }
     const total = Object.values(costState.byModel).reduce((a, b) => a + b, 0);
     send(res, 200, { date: costState.date, total_usd: round2(total), by_model: costState.byModel, daily_limit_usd: CFG.COST_DAILY_LIMIT_USD });
     return true;
@@ -699,9 +851,15 @@ async function handle(req, res) {
 
   let parsed = {};
   try { parsed = body.length ? JSON.parse(body.toString('utf8')) : {}; } catch {}
+  const briefTemplate = _extractBriefTemplate(parsed);
 
   const rawModel = parsed.model || '';
   const { provider, model } = classifyModel(rawModel);
+  // Per-model degraded check (informational only — never blocks or substitutes)
+  if (_checkModelDegraded(model)) {
+    reqLogger.warn({ event: 'model_degraded_request', model, request_id: requestId });
+    auditLog({ event: 'model_degraded_request', model, request_id: requestId });
+  }
   const breaker = breakers[provider];
   const limiter = limiters[provider];
 
@@ -775,6 +933,7 @@ async function handle(req, res) {
     ...(compressBytes ? { compressed_bytes: compressBytes } : {}),
     ...(cacheBreakpoints ? { cache_breakpoints: cacheBreakpoints } : {}),
     ...(thinkingBudget !== null ? { thinking_budget: thinkingBudget } : {}),
+    ...(briefTemplate ? { brief_template: briefTemplate } : {}),
   });
 
   inflight++;
@@ -783,7 +942,9 @@ async function handle(req, res) {
   let pRes;
   try {
     pRes = await forwardWithRetry(targetOpts, outBody, breaker, reqLogger);
+    _recordModelSuccess(routedModel);
   } catch (err) {
+    _recordModelFailure(routedModel);
     const statusCode = err.statusCode || 502;
     reqLogger.error({ event: 'request_failed', provider, model: routedModel, err: err.message, statusCode });
     auditLog({ event: 'request_failed', request_id: requestId, provider, model: routedModel, err: err.message });
@@ -856,6 +1017,7 @@ async function handle(req, res) {
         ...(compressBytes ? { compressed_bytes: compressBytes } : {}),
         ...(cacheBreakpoints ? { cache_breakpoints: cacheBreakpoints } : {}),
         ...(thinkingBudget !== null ? { thinking_budget: thinkingBudget } : {}),
+        ...(briefTemplate ? { brief_template: briefTemplate } : {}),
       });
     } else if (isJson && captured.length) {
       try {
@@ -882,13 +1044,14 @@ async function handle(req, res) {
           ...(compressBytes ? { compressed_bytes: compressBytes } : {}),
           ...(cacheBreakpoints ? { cache_breakpoints: cacheBreakpoints } : {}),
           ...(thinkingBudget !== null ? { thinking_budget: thinkingBudget } : {}),
+          ...(briefTemplate ? { brief_template: briefTemplate } : {}),
         });
       } catch {
         reqLogger.info({ event: 'request_end', provider, model: routedModel, status: pRes.statusCode, duration_sec: durSec });
       }
     } else {
       reqLogger.info({ event: 'request_end', provider, model: routedModel, status: pRes.statusCode, duration_sec: durSec });
-      auditLog({ event: 'request_end', request_id: requestId, provider, model: routedModel, status: pRes.statusCode, duration_sec: durSec });
+      auditLog({ event: 'request_end', request_id: requestId, provider, model: routedModel, status: pRes.statusCode, duration_sec: durSec, ...(briefTemplate ? { brief_template: briefTemplate } : {}) });
     }
   });
   pRes.on('error', (err) => {
@@ -931,6 +1094,9 @@ process.on('unhandledRejection', (err) => {
 // ── Boot (skip when required as a module) ────────────────────────────────
 if (require.main === module) {
   initAudit();
+  if (CFG.LISTEN_HOST !== '127.0.0.1' && !CFG.PROXY_AUTH_TOKEN) {
+    console.warn('[proxy] WARNING: bound to ' + CFG.LISTEN_HOST + ' without PROXY_AUTH_TOKEN — anyone on the network can hit this proxy. Set PROXY_AUTH_TOKEN.');
+  }
   server.listen(CFG.LISTEN_PORT, CFG.LISTEN_HOST, () => {
     logger.info({
       event: 'listening',
@@ -953,5 +1119,5 @@ module.exports = {
   CFG, classifyModel, applyGlmRigor, injectPromptCaching, TokenBucket, CircuitBreaker,
   trackCost, costState, PRICING,
   _auth: (req, token) => { const prev = CFG.PROXY_AUTH_TOKEN; CFG.PROXY_AUTH_TOKEN = token; const r = checkAuth(req); CFG.PROXY_AUTH_TOKEN = prev; return r; },
-  _breakers: breakers, _limiters: limiters,
+  _breakers: breakers, _limiters: limiters, modelStates, ollamaOutageState,
 };

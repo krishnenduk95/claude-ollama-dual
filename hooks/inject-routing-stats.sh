@@ -49,11 +49,16 @@ if models:
         sr = d.get("success_rate")
         er = d.get("error_rate")
         lat = d.get("avg_latency_sec")
+        p50 = d.get("p50_latency_sec")
+        p95 = d.get("p95_latency_sec")
         n = d.get("requests_30d")
         sr_str = f"{sr*100:.0f}%" if sr is not None else "?"
         er_str = f"{er*100:.1f}%" if er is not None else "?"
-        lat_str = f"{lat}s" if lat is not None else "?"
-        lines.append(f"  - {name}: success {sr_str}, err {er_str}, avg {lat_str} over {n} req")
+        if p50 is not None and p95 is not None:
+            lat_str = f"p50 {p50}s p95 {p95}s"
+        else:
+            lat_str = f"avg {lat}s" if lat is not None else "?"
+        lines.append(f"  - {name}: success {sr_str}, {lat_str}, err {er_str} over {n} req")
 
 if agents:
     lines.append("\nAgent win-rates by task type (sample size ≥ 2):")

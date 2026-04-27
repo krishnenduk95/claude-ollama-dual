@@ -19,13 +19,15 @@ payload=$(cat)
 # Pass payload via env var — avoids stdin collision with heredoc
 export HOOK_PAYLOAD="$payload"
 export LEARNINGS_PATH="$LEARNINGS_FILE"
-export MAX_INJECT=5
+export MAX_INJECT=3
+export LEARNINGS_MIN_SCORE="${LEARNINGS_MIN_SCORE:-0.15}"
 
 python3 <<'PY'
 import json, os, re, datetime, math, sys
 
 path = os.environ["LEARNINGS_PATH"]
 max_inject = int(os.environ["MAX_INJECT"])
+min_score = float((os.environ.get("LEARNINGS_MIN_SCORE") or "0.15"))
 payload_raw = os.environ.get("HOOK_PAYLOAD", "")
 
 try:
@@ -87,7 +89,9 @@ if not scored:
     sys.exit(0)
 
 scored.sort(key=lambda x: -x[0])
-top = scored[:max_inject]
+top = [(s, r) for s, r in scored if s >= min_score][:max_inject]
+if not top:
+    sys.exit(0)
 
 lines = ["📚 RELEVANT PAST LEARNINGS (from claude-dual memory fabric):\n"]
 for score, rec in top:

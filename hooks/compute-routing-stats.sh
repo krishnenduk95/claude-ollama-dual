@@ -13,7 +13,7 @@ OUT="${HOME}/.claude-dual/routing-stats.json"
 
 python3 <<PY
 import json, os, datetime, math
-from collections import defaultdict
+from collections import defaultdict, deque
 
 audit_path = "$AUDIT"
 learnings_path = "$LEARNINGS"
@@ -30,7 +30,7 @@ stats = {
 # ── Per-model stats from audit.jsonl (latency, error rate) ─────────
 if os.path.exists(audit_path):
     pending = {}  # request_id → {ts, model, provider}
-    model_data = defaultdict(lambda: {"requests":0, "ok":0, "err":0, "sum_dur":0.0, "n_dur":0})
+    model_data = defaultdict(lambda: {"requests":0, "ok":0, "err":0, "sum_dur":0.0, "n_dur":0, "durations": deque(maxlen=50)})
 
     with open(audit_path) as f:
         for line in f:
@@ -66,15 +66,28 @@ if os.path.exists(audit_path):
                     m["err"] += 1
                 elif isinstance(status,int) and 200 <= status < 400:
                     m["ok"] += 1
+                    if isinstance(dur, (int,float)):
+                        m["durations"].append(dur)
 
     for model, d in model_data.items():
         if d["requests"] < 5:
             continue
+        # p50/p95 from last 50 successful durations
+        dur_list = list(d["durations"])
+        if len(dur_list) >= 5:
+            sorted_durs = sorted(dur_list)
+            n = len(sorted_durs)
+            p50 = round(sorted_durs[n // 2], 2)
+            p95 = round(sorted_durs[int(math.ceil(n * 0.95)) - 1], 2)
+        else:
+            p50 = p95 = None
         stats["models"][model] = {
           "requests_30d": d["requests"],
           "success_rate": round(d["ok"]/d["requests"], 3) if d["requests"] else None,
           "error_rate":   round(d["err"]/d["requests"], 3) if d["requests"] else None,
           "avg_latency_sec": round(d["sum_dur"]/d["n_dur"], 2) if d["n_dur"] else None,
+          "p50_latency_sec": p50,
+          "p95_latency_sec": p95,
         }
 
 # ── Per-agent per-task-type win-rates from learnings.jsonl ─────────
