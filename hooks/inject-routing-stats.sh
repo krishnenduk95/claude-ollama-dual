@@ -62,19 +62,28 @@ if models:
 
 if agents:
     lines.append("\nAgent win-rates by task type (sample size ≥ 2):")
-    for agent, tasks in agents.items():
+    for agent, info in agents.items():
+        if not info:
+            continue
+        # T2-D nests under .task_types; old format had tasks at top level
+        tasks = info.get("task_types", info) if isinstance(info, dict) else {}
         if not tasks:
             continue
-        # Show best + worst 2 task types per agent
-        sorted_tasks = sorted(tasks.items(), key=lambda x: x[1]["success_rate"], reverse=True)
+        # Each entry uses {n, success_rate, avg_latency_sec, ...}; tolerate
+        # legacy 'total' key used before T2-D landed.
+        def n_of(d): return d.get("n", d.get("total", 0))
+        def sr_of(d): return d.get("success_rate", 0)
+        # Sort by success_rate desc, skip cells without success_rate (cold-start mid-write)
+        valid = [(t, d) for t, d in tasks.items() if "success_rate" in d]
+        sorted_tasks = sorted(valid, key=lambda x: sr_of(x[1]), reverse=True)
         best = sorted_tasks[:2]
-        worst = [t for t in sorted_tasks[-2:] if t[1]["success_rate"] < 0.8]
+        worst = [t for t in sorted_tasks[-2:] if sr_of(t[1]) < 0.8]
         cells = []
         for task, d in best:
-            cells.append(f"{task}={d['success_rate']*100:.0f}% (n={d['total']})")
+            cells.append(f"{task}={sr_of(d)*100:.0f}% (n={n_of(d)})")
         for task, d in worst:
             if (task, d) not in best:
-                cells.append(f"⚠ {task}={d['success_rate']*100:.0f}% (n={d['total']})")
+                cells.append(f"⚠ {task}={sr_of(d)*100:.0f}% (n={n_of(d)})")
         if cells:
             lines.append(f"  {agent}: " + ", ".join(cells))
 
