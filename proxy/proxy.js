@@ -763,6 +763,88 @@ function send(res, code, body) {
 }
 function round2(n) { return Math.round(n * 100) / 100; }
 
+// ── v1.23.0: Subagent output quality validation ───────────────────────
+// Validates Ollama response bodies for structural quality issues:
+//   missing-summary  — last 2KB of message text has no JSON SUMMARY block
+//   possibly-truncated — message text ends mid-sentence
+// Returns null (healthy) or a quality flag string.
+function validateSubagentOutput(bodyBuffer, provider) {
+  if (provider !== 'ollama') return null;
+  let body;
+  try { body = JSON.parse(bodyBuffer.toString('utf8')); } catch { return null; }
+  // Extract message text (Anthropic-shaped: body.content[].text; Ollama-native: body.message.content)
+  let text = '';
+  if (body.message && typeof body.message.content === 'string') {
+    text = body.message.content;
+  } else if (Array.isArray(body.content)) {
+    text = body.content
+      .filter(function(b) { return b && b.type === 'text' && typeof b.text === 'string'; })
+      .map(function(b) { return b.text; })
+      .join('');
+  }
+  if (!text) return null;
+  // Check 1: missing-summary — JSON SUMMARY must appear in last 2KB
+  const lastChunk = text.slice(-2048);
+  const summaryRe = /\{[^{}]*"subagent"\s*:\s*"[^"]+"\s*,[^{}]*"status"\s*:\s*"[^"]+"/;
+  if (!summaryRe.test(lastChunk)) return 'missing-summary';
+  // Check 2: possibly-truncated — skip if body is valid JSON (can't be truncated)
+  try { JSON.parse(bodyBuffer.toString('utf8')); return null; } catch {}
+  const tail = text.slice(-50);
+  if (/[,{\[]$/.test(tail)) return 'possibly-truncated';
+  if (/[.!?}]$/.test(tail)) return null;
+  return 'possibly-truncated';
+}
+
+// ── Extract task_type from JSON SUMMARY block (v1.24.0) ────────────────
+// Parses the last 2KB of Ollama response text for the JSON SUMMARY
+// block containing "subagent" and "task_type". Returns the task_type
+// string or null if not found / not Ollama.
+function extractTaskType(bodyBuffer, provider) {
+  if (provider !== 'ollama') return null;
+  let body;
+  try { body = JSON.parse(bodyBuffer.toString('utf8')); } catch { return null; }
+  let text = '';
+  if (body.message && typeof body.message.content === 'string') {
+    text = body.message.content;
+  } else if (Array.isArray(body.content)) {
+    text = body.content
+      .filter(function(b) { return b && b.type === 'text' && typeof b.text === 'string'; })
+      .map(function(b) { return b.text; })
+      .join('');
+  }
+  if (!text) return null;
+  const lastChunk = text.slice(-2048);
+  // Quick regex pre-check for JSON SUMMARY shape
+  if (!/\{[^{}]*"subagent"\s*:\s*"[^"]+"\s*,[^{}]*"status"/.test(lastChunk)) return null;
+  // Find the LAST `{` before "subagent" in the chunk
+  const idx = lastChunk.lastIndexOf('"subagent"');
+  if (idx === -1) return null;
+  let start = idx;
+  while (start >= 0) {
+    if (lastChunk[start] === '{') break;
+    start--;
+  }
+  if (start < 0) return null;
+  // Balanced brace counting from start
+  let depth = 0;
+  let end = start;
+  for (let i = start; i < lastChunk.length; i++) {
+    if (lastChunk[i] === '{') depth++;
+    else if (lastChunk[i] === '}') {
+      depth--;
+      if (depth === 0) { end = i + 1; break; }
+    }
+  }
+  if (depth !== 0) return null;
+  try {
+    const parsed = JSON.parse(lastChunk.slice(start, end));
+    if (typeof parsed.task_type === 'string' && parsed.task_type.length > 0) {
+      return parsed.task_type;
+    }
+  } catch {}
+  return null;
+}
+
 // ── Read request body with size limit ────────────────────────────────────
 function readBody(req) {
   return new Promise((resolve, reject) => {
@@ -958,70 +1040,31 @@ async function handle(req, res) {
     return;
   }
 
-  res.writeHead(pRes.statusCode, pRes.headers);
-  let captured = Buffer.alloc(0);
-  const contentType = pRes.headers['content-type'] || '';
-  const isJson = contentType.includes('application/json');
-  const isSSE = contentType.includes('text/event-stream');
-  let sseRemainder = '';
-  const sseTok = { input: 0, output: 0, cacheCreate: 0, cacheRead: 0 };
-  pRes.on('data', (chunk) => {
-    res.write(chunk);
-    if (isSSE) {
-      sseRemainder += chunk.toString('utf8');
-      const lines = sseRemainder.split('\n');
-      sseRemainder = lines.pop();
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        try {
-          const evt = JSON.parse(line.slice(6));
-          if (evt.type === 'message_start' && evt.message?.usage) {
-            const u = evt.message.usage;
-            sseTok.input = u.input_tokens || 0;
-            sseTok.cacheCreate = u.cache_creation_input_tokens || 0;
-            sseTok.cacheRead = u.cache_read_input_tokens || 0;
-          } else if (evt.type === 'message_delta' && evt.usage) {
-            sseTok.output = evt.usage.output_tokens || 0;
-          }
-        } catch {}
+  // ── v1.23.0: Response streaming / subagent quality validation ─────
+  let subagentQuality = null;
+  if (provider === 'ollama') {
+    // Buffer full body before writeHead so we can validate and stamp X-Subagent-Quality
+    const ollamaChunks = [];
+    pRes.on('data', (chunk) => { ollamaChunks.push(chunk); });
+    pRes.on('end', () => {
+      const fullBody = Buffer.concat(ollamaChunks);
+      try { subagentQuality = validateSubagentOutput(fullBody, provider); } catch {}
+      let taskType = null;
+      try { taskType = extractTaskType(fullBody, provider); } catch {}
+      if (subagentQuality) res.setHeader('X-Subagent-Quality', subagentQuality);
+      res.writeHead(pRes.statusCode, pRes.headers);
+      res.write(fullBody);
+      res.end();
+      const durSec = (Date.now() - start) / 1000;
+      const statusClass = `${Math.floor(pRes.statusCode / 100)}xx`;
+      if (metrics) {
+        metrics.requestsTotal.inc({ provider, model: routedModel, status_class: statusClass });
+        metrics.requestDuration.observe({ provider, model: routedModel }, durSec);
+        metrics.inflight.dec();
       }
-    } else if (isJson && captured.length < 1024 * 1024) {
-      captured = Buffer.concat([captured, chunk]);
-    }
-  });
-  pRes.on('end', () => {
-    res.end();
-    const durSec = (Date.now() - start) / 1000;
-    const statusClass = `${Math.floor(pRes.statusCode / 100)}xx`;
-    if (metrics) {
-      metrics.requestsTotal.inc({ provider, model: routedModel, status_class: statusClass });
-      metrics.requestDuration.observe({ provider, model: routedModel }, durSec);
-      metrics.inflight.dec();
-    }
-    inflight--;
-    if (isSSE && (sseTok.input || sseTok.output)) {
-      trackCost(routedModel, sseTok.input, sseTok.output);
-      reqLogger.info({
-        event: 'request_end', provider, model: routedModel, status: pRes.statusCode,
-        duration_sec: durSec, input_tokens: sseTok.input, output_tokens: sseTok.output,
-        cache_creation_tokens: sseTok.cacheCreate, cache_read_tokens: sseTok.cacheRead,
-        ...(compressBytes ? { compressed_bytes: compressBytes } : {}),
-        ...(cacheBreakpoints ? { cache_breakpoints: cacheBreakpoints } : {}),
-        ...(thinkingBudget !== null ? { thinking_budget: thinkingBudget } : {}),
-      });
-      auditLog({
-        event: 'request_end', request_id: requestId, provider, model: routedModel,
-        status: pRes.statusCode, duration_sec: durSec,
-        input_tokens: sseTok.input, output_tokens: sseTok.output,
-        cache_creation_tokens: sseTok.cacheCreate, cache_read_tokens: sseTok.cacheRead,
-        ...(compressBytes ? { compressed_bytes: compressBytes } : {}),
-        ...(cacheBreakpoints ? { cache_breakpoints: cacheBreakpoints } : {}),
-        ...(thinkingBudget !== null ? { thinking_budget: thinkingBudget } : {}),
-        ...(briefTemplate ? { brief_template: briefTemplate } : {}),
-      });
-    } else if (isJson && captured.length) {
+      inflight--;
       try {
-        const parsedRes = JSON.parse(captured.toString('utf8'));
+        const parsedRes = JSON.parse(fullBody.toString('utf8'));
         const u = parsedRes.usage || {};
         const inputTok = u.input_tokens || 0;
         const outputTok = u.output_tokens || 0;
@@ -1041,23 +1084,138 @@ async function handle(req, res) {
           status: pRes.statusCode, duration_sec: durSec,
           input_tokens: inputTok, output_tokens: outputTok,
           cache_creation_tokens: cacheCreate, cache_read_tokens: cacheRead,
+          subagent_quality: subagentQuality,
+          task_type: taskType,
           ...(compressBytes ? { compressed_bytes: compressBytes } : {}),
           ...(cacheBreakpoints ? { cache_breakpoints: cacheBreakpoints } : {}),
           ...(thinkingBudget !== null ? { thinking_budget: thinkingBudget } : {}),
           ...(briefTemplate ? { brief_template: briefTemplate } : {}),
         });
       } catch {
-        reqLogger.info({ event: 'request_end', provider, model: routedModel, status: pRes.statusCode, duration_sec: durSec });
+        reqLogger.info({
+          event: 'request_end', provider, model: routedModel,
+          status: pRes.statusCode, duration_sec: durSec,
+        });
+        auditLog({
+          event: 'request_end', request_id: requestId, provider, model: routedModel,
+          status: pRes.statusCode, duration_sec: durSec,
+          subagent_quality: subagentQuality,
+          task_type: taskType,
+          ...(briefTemplate ? { brief_template: briefTemplate } : {}),
+        });
       }
-    } else {
-      reqLogger.info({ event: 'request_end', provider, model: routedModel, status: pRes.statusCode, duration_sec: durSec });
-      auditLog({ event: 'request_end', request_id: requestId, provider, model: routedModel, status: pRes.statusCode, duration_sec: durSec, ...(briefTemplate ? { brief_template: briefTemplate } : {}) });
-    }
-  });
-  pRes.on('error', (err) => {
-    reqLogger.error({ event: 'response_stream_error', err: err.message });
-    if (!res.writableEnded) res.end();
-  });
+    });
+    pRes.on('error', (err) => {
+      reqLogger.error({ event: 'response_stream_error', err: err.message });
+      if (!res.writableEnded) res.end();
+    });
+  } else {
+    // Existing streaming logic for Anthropic (unchanged, +audit subagent_quality: null)
+    res.writeHead(pRes.statusCode, pRes.headers);
+    let captured = Buffer.alloc(0);
+    const contentType = pRes.headers['content-type'] || '';
+    const isJson = contentType.includes('application/json');
+    const isSSE = contentType.includes('text/event-stream');
+    let sseRemainder = '';
+    const sseTok = { input: 0, output: 0, cacheCreate: 0, cacheRead: 0 };
+    pRes.on('data', (chunk) => {
+      res.write(chunk);
+      if (isSSE) {
+        sseRemainder += chunk.toString('utf8');
+        const lines = sseRemainder.split('\n');
+        sseRemainder = lines.pop();
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          try {
+            const evt = JSON.parse(line.slice(6));
+            if (evt.type === 'message_start' && evt.message?.usage) {
+              const u = evt.message.usage;
+              sseTok.input = u.input_tokens || 0;
+              sseTok.cacheCreate = u.cache_creation_input_tokens || 0;
+              sseTok.cacheRead = u.cache_read_input_tokens || 0;
+            } else if (evt.type === 'message_delta' && evt.usage) {
+              sseTok.output = evt.usage.output_tokens || 0;
+            }
+          } catch {}
+        }
+      } else if (isJson && captured.length < 1024 * 1024) {
+        captured = Buffer.concat([captured, chunk]);
+      }
+    });
+    pRes.on('end', () => {
+      res.end();
+      const durSec = (Date.now() - start) / 1000;
+      const statusClass = `${Math.floor(pRes.statusCode / 100)}xx`;
+      if (metrics) {
+        metrics.requestsTotal.inc({ provider, model: routedModel, status_class: statusClass });
+        metrics.requestDuration.observe({ provider, model: routedModel }, durSec);
+        metrics.inflight.dec();
+      }
+      inflight--;
+      if (isSSE && (sseTok.input || sseTok.output)) {
+        trackCost(routedModel, sseTok.input, sseTok.output);
+        reqLogger.info({
+          event: 'request_end', provider, model: routedModel, status: pRes.statusCode,
+          duration_sec: durSec, input_tokens: sseTok.input, output_tokens: sseTok.output,
+          cache_creation_tokens: sseTok.cacheCreate, cache_read_tokens: sseTok.cacheRead,
+          ...(compressBytes ? { compressed_bytes: compressBytes } : {}),
+          ...(cacheBreakpoints ? { cache_breakpoints: cacheBreakpoints } : {}),
+          ...(thinkingBudget !== null ? { thinking_budget: thinkingBudget } : {}),
+        });
+        auditLog({
+          event: 'request_end', request_id: requestId, provider, model: routedModel,
+          status: pRes.statusCode, duration_sec: durSec,
+          input_tokens: sseTok.input, output_tokens: sseTok.output,
+          cache_creation_tokens: sseTok.cacheCreate, cache_read_tokens: sseTok.cacheRead,
+          subagent_quality: null,
+          task_type: null,
+          ...(compressBytes ? { compressed_bytes: compressBytes } : {}),
+          ...(cacheBreakpoints ? { cache_breakpoints: cacheBreakpoints } : {}),
+          ...(thinkingBudget !== null ? { thinking_budget: thinkingBudget } : {}),
+          ...(briefTemplate ? { brief_template: briefTemplate } : {}),
+        });
+      } else if (isJson && captured.length) {
+        try {
+          const parsedRes = JSON.parse(captured.toString('utf8'));
+          const u = parsedRes.usage || {};
+          const inputTok = u.input_tokens || 0;
+          const outputTok = u.output_tokens || 0;
+          const cacheCreate = u.cache_creation_input_tokens || 0;
+          const cacheRead = u.cache_read_input_tokens || 0;
+          if (inputTok || outputTok) trackCost(routedModel, inputTok, outputTok);
+          reqLogger.info({
+            event: 'request_end', provider, model: routedModel, status: pRes.statusCode,
+            duration_sec: durSec, input_tokens: inputTok, output_tokens: outputTok,
+            cache_creation_tokens: cacheCreate, cache_read_tokens: cacheRead,
+            ...(compressBytes ? { compressed_bytes: compressBytes } : {}),
+            ...(cacheBreakpoints ? { cache_breakpoints: cacheBreakpoints } : {}),
+            ...(thinkingBudget !== null ? { thinking_budget: thinkingBudget } : {}),
+          });
+          auditLog({
+            event: 'request_end', request_id: requestId, provider, model: routedModel,
+            status: pRes.statusCode, duration_sec: durSec,
+            input_tokens: inputTok, output_tokens: outputTok,
+            cache_creation_tokens: cacheCreate, cache_read_tokens: cacheRead,
+            subagent_quality: null,
+            task_type: null,
+            ...(compressBytes ? { compressed_bytes: compressBytes } : {}),
+            ...(cacheBreakpoints ? { cache_breakpoints: cacheBreakpoints } : {}),
+            ...(thinkingBudget !== null ? { thinking_budget: thinkingBudget } : {}),
+            ...(briefTemplate ? { brief_template: briefTemplate } : {}),
+          });
+        } catch {
+          reqLogger.info({ event: 'request_end', provider, model: routedModel, status: pRes.statusCode, duration_sec: durSec });
+        }
+      } else {
+        reqLogger.info({ event: 'request_end', provider, model: routedModel, status: pRes.statusCode, duration_sec: durSec });
+        auditLog({ event: 'request_end', request_id: requestId, provider, model: routedModel, status: pRes.statusCode, duration_sec: durSec, subagent_quality: null, task_type: null, ...(briefTemplate ? { brief_template: briefTemplate } : {}) });
+      }
+    });
+    pRes.on('error', (err) => {
+      reqLogger.error({ event: 'response_stream_error', err: err.message });
+      if (!res.writableEnded) res.end();
+    });
+  }
 }
 
 // ── Server + graceful shutdown ───────────────────────────────────────────

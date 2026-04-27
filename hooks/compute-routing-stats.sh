@@ -134,6 +134,86 @@ if os.path.exists(learnings_path):
               "verified_count": d["verified"],
             }
 
+# ── Per-agent per-task-type success rates from audit.jsonl task_type ──
+# Maps Ollama model to its primary agent (first in the subagent pool)
+MODEL_PRIMARY_AGENT = {
+    "glm-5.1:cloud": "glm-architect",
+    "deepseek-v4-flash:cloud": "glm-worker",
+    "kimi-k2.5:cloud": "glm-explorer",
+    "qwen3-coder-next:cloud": "glm-test-generator",
+}
+TASK_TYPE_AGENT_OVERRIDE = {
+    "implementation": "glm-worker",
+    "refactor": "glm-worker",
+    "exploration": "glm-explorer",
+    "review": "glm-reviewer",
+    "security-audit": "glm-security-auditor",
+    "architecture": "glm-architect",
+    "api-design": "glm-api-designer",
+    "ui-component": "glm-ui-builder",
+    "test-generation": "glm-test-generator",
+}
+
+def _model_to_agent(model, task_type):
+    if task_type in TASK_TYPE_AGENT_OVERRIDE:
+        return TASK_TYPE_AGENT_OVERRIDE[task_type]
+    if model in MODEL_PRIMARY_AGENT:
+        return MODEL_PRIMARY_AGENT[model]
+    return "glm-worker"  # fallback
+
+task_type_data = defaultdict(lambda: defaultdict(
+    lambda: {"n":0, "successes":0, "total_latency":0.0}
+))
+
+if os.path.exists(audit_path):
+    with open(audit_path) as f:
+        for line in f:
+            try:
+                e = json.loads(line)
+            except Exception:
+                continue
+            if e.get("event") not in ("request_end", "request_failed"):
+                continue
+            provider = e.get("provider", "") or ""
+            if provider != "ollama":
+                continue
+            tt = e.get("task_type")
+            if not tt or not isinstance(tt, str) or not tt.strip():
+                continue
+            tt = tt.strip()
+            model = e.get("model", "") or ""
+            agent = _model_to_agent(model, tt)
+            status = e.get("status", 0)
+            sq = e.get("subagent_quality")
+            success = (
+                (isinstance(status, int) and status == 200)
+                or sq is None or sq == "healthy"
+            )
+            dur = e.get("duration_sec", 0)
+            if not isinstance(dur, (int, float)):
+                dur = 0.0
+            ttd = task_type_data[agent][tt]
+            ttd["n"] += 1
+            if success:
+                ttd["successes"] += 1
+            ttd["total_latency"] += dur
+
+# Merge into stats["agents"]
+for agent, task_types in task_type_data.items():
+    if agent not in stats["agents"]:
+        stats["agents"][agent] = {}
+    task_type_summary = {}
+    for task_type, d in task_types.items():
+        entry = {
+            "n": d["n"],
+            "success_rate": round(d["successes"]/d["n"], 3) if d["n"] else 0.0,
+            "avg_latency_sec": round(d["total_latency"]/d["n"], 2) if d["n"] else None,
+        }
+        if d["n"] < 5:
+            entry["cold_start"] = True
+        task_type_summary[task_type] = entry
+    stats["agents"][agent]["task_types"] = task_type_summary
+
 with open(out_path, "w") as f:
     json.dump(stats, f, indent=2)
 print(f"routing-stats written: {out_path} ({len(stats['models'])} models, {sum(len(v) for v in stats['agents'].values())} agent-task cells)")

@@ -1,0 +1,12 @@
+{
+  "_comment": "Subagent fallback chains. Used by subagent-quality-gate.sh when a subagent reports status=failure. The first chain entry is the suggested first fallback. Empty array = no fallback (escalate to Opus directly).",
+  "glm-worker": ["glm-api-designer", "glm-architect"],
+  "glm-explorer": ["glm-architect"],
+  "glm-reviewer": ["glm-security-auditor"],
+  "glm-analyst": ["glm-architect"],
+  "glm-architect": [],
+  "glm-api-designer": ["glm-worker"],
+  "glm-ui-builder": ["glm-worker"],
+  "glm-test-generator": ["glm-worker"],
+  "glm-security-auditor": []
+}
